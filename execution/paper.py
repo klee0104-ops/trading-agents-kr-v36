@@ -112,7 +112,11 @@ class PaperAccount:
         d = self._read()
         daily = d.get("daily", [])
         if not daily:
-            return {"days": 0, "initial_cash": d.get("initial_cash"), "equity": d.get("cash"), "total_return_pct": 0.0}
+            return {"days": 0, "initial_cash": d["initial_cash"], "equity": d["cash"],
+                    "cash": d["cash"], "holdings": dict(d.get("holdings", {})),
+                    "total_return_pct": 0.0, "pnl": 0.0, "trades": 0, "fees": 0.0,
+                    "sharpe_annual": None, "max_drawdown_pct": None, "win_rate": None,
+                    "equity_curve": [], "recent_trades": [], "recent_days": []}
         from execution.position import performance
         perf = performance([x["day_return_pct"] for x in daily], positions=[x["target_position"] for x in daily])
         peak = max(x["equity"] for x in daily)

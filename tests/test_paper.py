@@ -23,3 +23,11 @@ def test_paper_long_then_cash_then_short():
 def test_paper_no_etf_data():
     a = PaperAccount(None)
     assert a.settle_day("2026-09-29", 1.0, {"long": None, "short": None}) is None
+
+
+def test_unstarted_account_summary_has_displayable_balance():
+    s = PaperAccount(None, 2500000).summary()
+    assert s['initial_cash'] == s['cash'] == s['equity'] == 2500000
+    assert s['days'] == s['trades'] == s['pnl'] == s['total_return_pct'] == s['fees'] == 0
+    assert s['holdings'] == {} and s['recent_trades'] == []
+    assert s['sharpe_annual'] is None and s['max_drawdown_pct'] is None

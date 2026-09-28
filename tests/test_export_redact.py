@@ -43,6 +43,33 @@ def test_paper_public_uses_only_simulated_summary(monkeypatch):
     assert _paper_public() == {'days': 3, 'total_return_pct': 2.5, 'cash': 100}
 
 
+def test_unstarted_account_is_included_and_renders(monkeypatch):
+    import json
+    import shutil
+    import subprocess
+    from execution.paper import PaperAccount
+    from web.export_site import _paper_public, _JS
+    summary = PaperAccount(None, 10000000).summary()
+    monkeypatch.setattr(PaperAccount, 'summary', lambda self: summary)
+    public = _paper_public()
+    assert public['days'] == 0 and public['cash'] == public['equity'] == 10000000
+    node = shutil.which('node')
+    assert node, 'Node is required to check shared report rendering'
+    # Execute the actual exported renderer against an in-memory DOM.
+    source = '''const vm=require('node:vm'), assert=require('node:assert/strict');
+const nodes={}; const data=DATA;
+const document={getElementById(id){return nodes[id]||(nodes[id]={textContent:id==='ta-data'?JSON.stringify(data):'',innerHTML:''});}};
+vm.runInNewContext(SOURCE,{document});
+const html=nodes.paper.innerHTML;
+assert.ok(html.includes('10,000,000'));
+assert.ok(html.includes('운용 시작 전'));
+assert.ok(html.includes('0건'));
+assert.ok(!/NaN|undefined|null%/.test(html));
+'''.replace('DATA', json.dumps({'generated_at': '2026-09-28', 'paper': public}, ensure_ascii=False)).replace('SOURCE', json.dumps(_JS))
+    result = subprocess.run([node, '-'], input=source, text=True, encoding='utf-8', capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_export_masks_loaded_arbitrary_secret(monkeypatch, tmp_path):
     from web import export_site as ex
     from security.secret_store import register_runtime_secret
