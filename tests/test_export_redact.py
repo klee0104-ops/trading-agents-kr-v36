@@ -19,14 +19,28 @@ def test_no_titles_no_change():
     assert _redact_deep(data, _news_cores([])) == data
 
 
-def test_shared_html_excludes_account_and_external_fonts():
+def test_shared_html_includes_simulated_returns_but_not_unknown_account_fields():
+    import json
+    import re
     from web.export_site import render_fragment
-    secret_account = 'PRIVATE_ACCOUNT_SENTINEL'
-    page = render_fragment({'paper': {'holdings': {secret_account: 123}}})
-    assert secret_account not in page
-    assert 'data-tab="paper"' not in page
+    page = render_fragment({'paper': {'days': 2, 'equity': 10100000,
+        'total_return_pct': 1.0, 'holdings': {'069500': 10}, 'private_note': 'DO_NOT_SHARE'}})
+    data = json.loads(re.search(r'id="ta-data">(.*?)</script>', page, re.S).group(1))
+    assert data['paper']['total_return_pct'] == 1.0
+    assert data['paper']['holdings'] == {'069500': 10}
+    assert 'DO_NOT_SHARE' not in page
+    assert 'data-tab="paper"' in page
+    assert '실제 자금 거래 없음' in page
     assert 'fonts.googleapis.com' not in page
     assert 'fetch(' not in page
+
+
+def test_paper_public_uses_only_simulated_summary(monkeypatch):
+    from execution.paper import PaperAccount
+    from web.export_site import _paper_public
+    monkeypatch.setattr(PaperAccount, 'summary', lambda self: {
+        'days': 3, 'total_return_pct': 2.5, 'cash': 100, 'private_note': 'hidden'})
+    assert _paper_public() == {'days': 3, 'total_return_pct': 2.5, 'cash': 100}
 
 
 def test_export_masks_loaded_arbitrary_secret(monkeypatch, tmp_path):

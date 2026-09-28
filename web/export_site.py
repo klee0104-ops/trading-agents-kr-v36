@@ -79,6 +79,11 @@ def _returns_public(rb) -> dict | None:
     return out
 
 
+_PAPER_FIELDS = ("days", "initial_cash", "equity", "pnl", "total_return_pct", "sharpe_annual",
+                 "max_drawdown_pct", "win_rate", "trades", "fees", "equity_curve", "recent_days",
+                 "cash", "holdings", "recent_trades")
+
+
 def _paper_public() -> dict | None:
     try:
         from execution.paper import PaperAccount
@@ -87,9 +92,7 @@ def _paper_public() -> dict | None:
         return None
     if not sm.get("days"):
         return None
-    return {k: sm.get(k) for k in ("days", "initial_cash", "equity", "pnl", "total_return_pct", "sharpe_annual",
-                                    "max_drawdown_pct", "win_rate", "trades", "fees", "equity_curve", "recent_days",
-                                    "cash", "holdings", "recent_trades")}
+    return _pick(sm, _PAPER_FIELDS)
 
 
 def _pick(d: dict, keys) -> dict:
@@ -151,7 +154,7 @@ def build_snapshot_data() -> dict:
         "baselines_today": {k: {"label": BASELINES[k], "direction": d} for k, d in today_base.items() if k in BASELINES},
         "baseline_compare": stats.get("baseline_compare"),
         "returns": _returns_public(stats.get("returns")),
-        "paper": None,  # Shared reports never include personal account data.
+        "paper": _paper_public(),  # User-authorized simulated returns and trades.
         "generated_at": datetime.now().isoformat(timespec="minutes"),
         "analysis_at": last.get("saved_at"),
         "prediction": {
@@ -522,9 +525,10 @@ _BODY = """<title>KOSPI 멀티에이전트 리포트</title>
       <a href="#stocks" data-tab="stocks">관심 종목</a>
       <a href="#process" data-tab="process">분석 과정</a>
       <a href="#performance" data-tab="performance">성과·수익률</a>
+      <a href="#paper" data-tab="paper">모의투자 수익률</a>
       <a href="#records" data-tab="records">예측 기록</a>
     </nav>
-    <span class="ro"><b>읽기 전용</b> 분석 실행 불가</span>
+    <span class="ro"><b>읽기 전용 · 모의투자</b> 실제 자금 거래 없음</span>
     <button class="btn" id="btnTheme">☀ 밝게</button>
   </div>
 </header>
@@ -568,7 +572,7 @@ _BODY = """<title>KOSPI 멀티에이전트 리포트</title>
     </div>
   </div>
   <div class="panel" id="tab-paper">
-    <section><h2>가상 계좌 <span class="h2-sub">모의투자 · 시작 1,000만 원 · 매일 시가 리밸런싱 → 종가 평가 · 수수료 0.015% + 슬리피지 0.05%</span></h2><div id="paper" style="display:grid;gap:14px"></div></section>
+    <section><h2>모의투자 수익률 <span class="h2-sub">가상계좌 · 실제 자금 거래 없음 · 매일 시가 리밸런싱 → 종가 평가 · 수수료 0.015% + 슬리피지 0.05%</span></h2><div id="paper" style="display:grid;gap:14px"></div></section>
   </div>
   <div class="panel" id="tab-records">
     <section><h2>예측 기록</h2><div id="records"></div></section>
@@ -602,8 +606,8 @@ _BODY = """<title>KOSPI 멀티에이전트 리포트</title>
 
 
 def render_fragment(data: dict) -> str:
-    # Enforce privacy at the final rendering boundary, including direct callers.
-    data = {**data, "paper": None}
+    # Only the approved simulated-account fields may enter a shared report.
+    data = {**data, "paper": _pick(data.get("paper") or {}, _PAPER_FIELDS) or None}
     # </script> 탈출 방지: JSON 안의 '<'를 유니코드 이스케이프
     data_json = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
     out = _BODY.replace("{css}", _CSS).replace("{js}", _JS).replace("{data}", data_json)
