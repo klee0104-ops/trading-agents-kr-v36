@@ -1,0 +1,42 @@
+# 비밀값 — 절대 커밋/공유 금지
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 로컬 데이터 (개인 예측 기록/수집 DB)
+memory_store.json
+demo_memory.json
+last_outcome.json
+실행로그.txt
+진단결과.txt
+*.db
+*.sqlite
+
+# 환경/캐시
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.claude/
+release/
+*.zip
+*.log
+site/
+kospi_top_cache.json
+
+# Private operational files and review backups
+paper_account.json
+lessons.json
+backtest_results*.json
+*_log.txt
+아침요약.txt
+ticker_map_cache.json
+*.bak
+*.pdf
+flow_debug.html
+.review-backups/
+.codex/
+.agents/
