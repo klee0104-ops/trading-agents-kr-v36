@@ -53,9 +53,17 @@ def test_cli_market_day_exit_code(monkeypatch, when, code):
 
 def test_morning_batch_skips_on_holiday_before_any_ai_call():
     text = (ROOT / "자동분석_실행.bat").read_bytes().decode("cp949")
-    i_day = text.index("python cli.py market-day")
-    assert "if errorlevel 2 exit /b 0" in text[i_day:i_day + 120]
-    assert i_day < text.index("python cli.py verify") < text.index("python cli.py run")
+    assert '-B -m tools.morning_run' in text
+    from tools.morning_run import orchestrate
+    from datetime import datetime
+    from data.sessions import KST
+    from data.krx_calendar import is_trading_day
+    calls=[];states=[]
+    result=orchestrate(lambda:datetime(2026,9,26,7,30,tzinfo=KST),
+                       lambda step:calls.append(step) or 0,lambda _:None,
+                       is_trading_day,states.append,lambda:None)
+    assert result==0 and calls==[] and states[-1]['status']=='skipped_holiday'
+
 
 
 def test_citation_trial_runs_offline_without_writing_records(monkeypatch):
