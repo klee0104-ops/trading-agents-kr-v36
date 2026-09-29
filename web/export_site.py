@@ -691,7 +691,7 @@ _JS = r"""
       '<div class="r">'+(s.assessment_status==='held'?esc(s.assessment_note||'근거 부족')+' · ':'')+esc(s.bias_reason||'')+'<br>'+esc(s.moderated&&s.moderation_reason?s.moderation_reason:(s.reason||''))+'</div></div>';}
   $('core').innerHTML=(D.core_stocks||[]).map(card).join('')||'<div class="empty">없음</div>';
   $('watch').innerHTML=((D.watch_stocks||[]).map(card).join('')||'<div class="empty">없음</div>')+
-    (D.stock_moderation?'<div class="ev" style="grid-column:1/-1">관심 종목은 KOSPI 시총 100 중 무작위 추첨. 종목 중재자가 '+D.stock_moderation.reviewed+'종목을 검토해 '+D.stock_moderation.adjusted_to_flat+'종목을 보합으로 조정했습니다.</div>':'');
+    (D.stock_moderation?'<div class="ev" style="grid-column:1/-1">추천 분석 대상은 KOSPI 시총 100에서 선정한 종목이며 매수 추천이 아닙니다.  종목 중재자가 '+D.stock_moderation.reviewed+'종목을 검토해 '+D.stock_moderation.adjusted_to_flat+'종목을 보합으로 조정했습니다.</div>':'');
 
   (function(){
   if(typeof document.createElement!=='function')return;
@@ -708,11 +708,12 @@ _JS = r"""
     return '<button type="button" class="stock-tile" data-stock-open="'+idx+'" aria-label="'+esc(s.name)+' 주가와 분석 상세 보기"><span class="stock-top"><span class="stock-avatar">'+esc(s.name.slice(0,1))+'</span><span><strong>'+esc(s.name)+'</strong><small>'+esc(q.code||'종목코드 확인 중')+'</small></span><span class="stock-arrow">›</span></span><span class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</span><span class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct):'—')+' <small>전일 대비</small></span>'+stockLine(stockHistory(q),true)+'<span class="stock-bottom">AI '+esc(stockForecastLabel(s))+'<small>'+(q.status==='unavailable'?'갱신 실패 · 이전 자료':esc(q.date||'자료 대기'))+'</small></span></button>';
   }
   $('core').innerHTML=(D.core_stocks||[]).map(simpleStock).join('')||'<p class="empty">추천 종목을 기다리고 있어요</p>';
-  $('watch').innerHTML=(D.watch_stocks||[]).map(simpleStock).join('')||'<p class="empty">관심 종목을 기다리고 있어요</p>';
+  $('watch').innerHTML=(D.watch_stocks||[]).map(simpleStock).join('')||'<p class="empty">추천 분석 종목을 기다리고 있어요</p>';
   var detail=document.createElement('dialog');detail.className='stock-dialog';detail.setAttribute('aria-labelledby','stockDetailTitle');document.body.appendChild(detail);
   var stockTrigger=null;
+  function selectedCompanyReport(name){var list=((D.company_research||{}).reports||[]).filter(function(r){return r.name===name;});return '<details class="stock-research-detail"><summary>기업 심층분석 보고서 보기</summary>'+companyReportView(list.length?list[list.length-1]:null,esc)+'</details>';}
   function showStock(index){var s=stockItems[index];if(!s)return;var q=(D.stock_quotes||{})[s.name]||{},rows=stockHistory(q);
-    detail.innerHTML='<div class="stock-detail-head"><div><small>종목 살펴보기 · '+esc(q.code||'코드 미확인')+'</small><h2 id="stockDetailTitle">'+esc(s.name)+'</h2></div><button type="button" class="detail-close" aria-label="종목 상세 닫기">×</button></div><div class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</div><p class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct)+' · 전일 대비':'현재 시세 없음')+'</p><div class="stock-period"><button type="button" data-period="5">최근 5일</button><button type="button" data-period="10" aria-pressed="true">최근 10일</button></div><div id="stockChartArea"></div><p class="ev">일별 종가 흐름 · 오늘 장중에는 마지막 값이 변동됩니다. '+esc(q.source||'출처 대기')+' · 수집 '+esc(q.checked_at||'미확인')+'</p><details class="stock-prices"><summary>날짜별 가격 보기</summary><div id="stockPriceRows"></div></details><h3>AI는 이렇게 판단했어요</h3>'+card(s)+'<p class="ev">예측은 매수 지시가 아닙니다. 이 화면에서는 주문이나 AI 분석을 실행하지 않습니다.</p>';
+    detail.innerHTML='<div class="stock-detail-head"><div><small>종목 살펴보기 · '+esc(q.code||'코드 미확인')+'</small><h2 id="stockDetailTitle">'+esc(s.name)+'</h2></div><button type="button" class="detail-close" aria-label="종목 상세 닫기">×</button></div><div class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</div><p class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct)+' · 전일 대비':'현재 시세 없음')+'</p><div class="stock-period"><button type="button" data-period="5">최근 5일</button><button type="button" data-period="10" aria-pressed="true">최근 10일</button></div><div id="stockChartArea"></div><p class="ev">일별 종가 흐름 · 오늘 장중에는 마지막 값이 변동됩니다. '+esc(q.source||'출처 대기')+' · 수집 '+esc(q.checked_at||'미확인')+'</p><details class="stock-prices"><summary>날짜별 가격 보기</summary><div id="stockPriceRows"></div></details><h3>AI는 이렇게 판단했어요</h3>'+card(s)+selectedCompanyReport(s.name)+'<p class="ev">예측은 매수 지시가 아닙니다. 이 화면에서는 주문이나 AI 분석을 실행하지 않습니다.</p>';
     function draw(count){var r=rows.slice(-count);detail.querySelector('#stockChartArea').innerHTML=stockLine(r,false)+(r.length?'<p class="stock-dates"><span>'+esc(r[0].date)+'</span><span>'+esc(r[r.length-1].date)+' · '+r.length+'개 관측값</span></p>':'');detail.querySelector('#stockPriceRows').innerHTML=r.map(function(x){return '<p class="stock-dates"><span>'+esc(x.date)+'</span><b>'+fv(x.close)+'원</b></p>';}).join('')||'자료 없음';detail.querySelectorAll('[data-period]').forEach(function(b){b.setAttribute('aria-pressed',String(Number(b.dataset.period)===count));});}
     draw(10);detail.querySelectorAll('[data-period]').forEach(function(b){b.addEventListener('click',function(){draw(Number(b.dataset.period));});});detail.querySelector('.detail-close').addEventListener('click',function(){detail.close();});detail.showModal();
   }
@@ -1015,7 +1016,7 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
     <a class="brand" id="brandHome" href="#today" aria-label="시그널랩 — 첫 화면으로"><span class="logo">SL</span><span><b>시그널랩 <span style="font-size:12px;font-weight:500;color:var(--muted)">Signal Lab</span></b><small>대상 거래일 <span class="mono" id="tgt"></span> · 분석 <span class="mono" id="asof"></span></small></span></a>
     <nav class="tabs" id="tabs">
       <a href="#today" data-tab="today" class="active"><i>◎</i><span class="l">오늘의 예측</span><span class="s">예측</span></a>
-      <a href="#stocks" data-tab="stocks"><i>▦</i><span class="l">관심 종목</span><span class="s">종목</span></a>
+      <a href="#stocks" data-tab="stocks"><i>▦</i><span class="l">추천 분석 종목</span><span class="s">종목</span></a>
       <a href="#process" data-tab="process"><i>⋯</i><span class="l">분석 과정</span><span class="s">과정</span></a>
       <a href="#performance" data-tab="performance"><i>↗</i><span class="l">성과·수익률</span><span class="s">성과</span></a>
       <a href="#reports" data-tab="reports"><i>▤</i><span class="l">팀 보고서</span><span class="s">보고서</span></a>
@@ -1050,7 +1051,7 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
   </div>
   <div class="panel" id="tab-stocks">
     <section><h2>추천 종목 <span class="h2-sub">삼성전자 · SK하이닉스</span></h2><p class="ev">AI 분석 대상으로 선정된 종목입니다. 상승·하락·보합 예측을 모두 포함하며, 매수 지시가 아닙니다. 현재 등락은 전일 종가 대비이며 장중 비교는 확정 적중률에 반영하지 않습니다.</p><div class="stocks" id="core"></div>
-      <h2 style="margin-top:20px">관심 종목 <span class="h2-sub">종목을 눌러 주가 흐름과 판단 근거 보기</span></h2><div class="stocks" id="watch"></div></section>
+      <h2 style="margin-top:20px">추천 분석 종목 <span class="h2-sub">종목을 눌러 주가 흐름과 판단 근거 보기</span></h2><div class="stocks" id="watch"></div></section>
   </div>
   <div class="panel" id="tab-process">
     <div class="grid">

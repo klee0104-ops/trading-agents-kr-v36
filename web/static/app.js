@@ -171,7 +171,7 @@ function renderKPI() {
     label: "분석 종목 수",
     value: coreN + watchN ? `${coreN + watchN}개` : "—",
     cls: "",
-    delta: `핵심 ${coreN} · 관심 ${watchN}`,
+    delta: `주요 ${coreN} · 추천 분석 ${watchN}`,
   });
 
   const cases = lastOutcome?.similar_cases ?? [];
@@ -460,6 +460,7 @@ function stockCard(s) {
       ${sig==='flat'?`<div class="meta">보합권 · ${escapeHtml(({up:'상승 쪽 우세',down:'하락 쪽 우세',neutral:'방향 우세 없음'})[s.direction_bias]||'기존 기록 · 세부 판단 미검증')} · 확신도 ${escapeHtml(({low:'낮음',mid:'중간',high:'높음'})[s.bias_confidence]||'미기록')}</div>`:''}
       ${mod}
       <div class="meta">${escapeHtml(s.bias_reason || s.assessment_note || "")}</div>
+      <p><a href="#company">기업 심층분석 보고서 검색 →</a></p>
       <div class="reason">${escapeHtml(s.moderated && s.moderation_reason ? s.moderation_reason : (s.reason || ""))}</div>
     </div>
   `;
@@ -475,7 +476,7 @@ function renderStocks() {
   $("#watchStockGrid").innerHTML = (result.watch_stocks || []).map(stockCard).join("");
   const sm = result.stock_moderation;
   const note = $("#watchNote");
-  if (note) note.textContent = sm ? `오늘 관심 종목은 KOSPI 시총 100 중 무작위 추첨(시총 상위 30에서 절반, 31~100에서 절반). 종목 중재자가 ${sm.reviewed}종목을 검토해 ${sm.adjusted_to_flat}종목을 보합으로 조정했습니다.` : "";
+  if (note) note.textContent = sm ? `오늘 추천 분석 종목은 KOSPI 시총 100 중 무작위 추첨(시총 상위 30에서 절반, 31~100에서 절반). 종목 중재자가 ${sm.reviewed}종목을 검토해 ${sm.adjusted_to_flat}종목을 보합으로 조정했습니다.` : "";
 }
 
 function renderDebate() {
@@ -541,7 +542,7 @@ function renderHistory() {
   const sm = stats.stock_moderation || {};
   const smText = sm.watch_total ? `<div class="section-label">종목 신호 적중</div><table class="stat-table"><tbody>
       <tr><td>핵심 2종목</td><td class="num">${sm.core_correct}/${sm.core_total}</td></tr>
-      <tr><td>관심 종목 (추첨)</td><td class="num">${sm.watch_correct}/${sm.watch_total}</td></tr>
+      <tr><td>추천 분석 종목 (선정)</td><td class="num">${sm.watch_correct}/${sm.watch_total}</td></tr>
       <tr><td>중재자가 보합으로 조정한 종목</td><td class="num">${sm.adjusted}건 · 보합 적중 ${sm.flat_correct} · 원래 신호였다면 적중 ${sm.original_would_be_correct}</td></tr>
     </tbody></table>` : "";
 
