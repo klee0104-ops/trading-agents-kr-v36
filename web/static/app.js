@@ -162,6 +162,54 @@ function renderTicker() {
   }).join("");
 }
 
+// ---- (V3.26) 시계 · 장 상태 · 실시간 국내 지수 ------------------------------------
+const KST_FMT = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit",
+  weekday: "short", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+function kstParts(d = new Date()) { const o = {}; KST_FMT.formatToParts(d).forEach(p => { o[p.type] = p.value; }); return o; }
+function marketStatusKst(d = new Date()) {
+  const p = kstParts(d);
+  if (p.weekday === "토" || p.weekday === "일") return { code: "weekend", label: "휴장(주말)" };
+  const m = (Number(p.hour) % 24) * 60 + Number(p.minute);
+  if (m < 540) return { code: "pre", label: "장 시작 전" };
+  if (m < 930) return { code: "open", label: "장중" };
+  if (m < 940) return { code: "closing", label: "종가 확정 중" };
+  return { code: "closed", label: "장 마감" };
+}
+function agoText(iso) {  // 시간대 없는 ISO 는 KST 로 본다
+  if (!iso) return "";
+  const s = String(iso);
+  const t = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s.replace(" ", "T") + "+09:00");
+  if (!Number.isFinite(t)) return "";
+  const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (sec < 60) return `${sec}초 전`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}분 전`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}시간 ${Math.floor((sec % 3600) / 60)}분 전`;
+  return `${Math.floor(sec / 86400)}일 전`;
+}
+function updateAges() { document.querySelectorAll("[data-ago]").forEach(el => { el.textContent = agoText(el.getAttribute("data-ago")); }); }
+function tickClock() {
+  const box = $("#clock");
+  if (box) {
+    const p = kstParts(), st = marketStatusKst();
+    box.textContent = `${p.month}.${p.day}(${p.weekday}) ${String(Number(p.hour) % 24).padStart(2, "0")}:${p.minute}:${p.second} KST · ${st.label}`;
+    box.className = `badge clock st-${st.code}`;
+  }
+  updateAges();
+}
+let liveData = null;
+async function loadLive() {
+  try {
+    const res = await fetch("/api/live", { credentials: "same-origin" });
+    if (res.ok) liveData = await res.json();
+  } catch (_) { /* offline — 기존 시장 현황판 유지 */ }
+  renderBoard();
+}
+function scheduleLive() {
+  const code = marketStatusKst().code;
+  const ms = (code === "open" || code === "closing") ? 30000 : 300000;  // 장중 30초, 그 외 5분
+  setTimeout(async () => { if (!document.hidden) await loadLive(); scheduleLive(); }, ms);
+}
+
 let marketBoard = null;
 async function loadMarket() {
   try {
@@ -182,21 +230,26 @@ function renderBoard() {
     (sn.us_indices || []).forEach(x => rows.push({ name: x.name, group: "us", value: x.value, change_pct: x.change_pct, date: x.as_of }));
     (sn.macro || []).forEach(x => rows.push({ name: x.name, group: "macro", value: x.value, change_pct: x.change_pct }));
   }
-  const k = rows.find(r => r.group === "kr");
+  let k = rows.find(r => r.group === "kr");
+  const lk = (liveData?.rows || []).find(r => r.name === "KOSPI");
+  const lq = (liveData?.rows || []).find(r => r.name === "KOSDAQ");
+  if (lk && (!k || String(lk.date) >= String(k.date || ""))) k = { ...lk, live: true };
   const cls = c => (typeof c === "number" ? (c > 0 ? "up" : c < 0 ? "down" : "flat") : "flat");
   const fmtV = v => (v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }));
   const tr = r => `<tr><td class="nm">${escapeHtml(r.name)}</td><td class="val">${fmtV(r.value)}</td><td class="chg ${cls(r.change_pct)}">${typeof r.change_pct === "number" ? fmtPct(r.change_pct) : "—"}</td></tr>`;
   const us = rows.filter(r => r.group === "us"), mc = rows.filter(r => r.group === "macro");
   const flow = sn.kr_flow;
   box.innerHTML = `
-    <h2>시장 현황 <span class="h2-sub">${live ? `<span class="live"></span>${escapeHtml(marketBoard.fetched_at || "")} 기준` : "분석 당시 스냅샷"}</span></h2>
-    ${k ? `<div class="kq ${cls(k.change_pct)}"><div class="nm"><span>KOSPI ${k.is_today ? "오늘" : escapeHtml(k.date || "")}${k.is_today ? " · 장중/종가" : " 종가"}</span><span>전일 ${fmtV(k.prev)}</span></div><div class="px">${fmtV(k.value)}</div><div class="ch">${fmtPct(k.change_pct)} (${(k.value - k.prev).toFixed(2)})</div></div>` : ""}
+    <h2>시장 현황 <span class="h2-sub">${k?.live ? `<span class="live"></span>실시간 · ${escapeHtml(liveData.status?.label || "")}` : live ? `<span class="live"></span>${escapeHtml(marketBoard.fetched_at || "")} 기준` : "분석 당시 스냅샷"}</span></h2>
+    ${k ? `<div class="kq ${cls(k.change_pct)}"><div class="nm"><span>KOSPI ${k.is_today ? "오늘" : escapeHtml(k.date || "")}${k.is_today ? (k.live && liveData.status?.code === "open" ? " · 장중" : " · 종가") : " 종가"}</span><span>전일 ${fmtV(k.prev)}</span></div><div class="px">${fmtV(k.value)}</div><div class="ch">${fmtPct(k.change_pct)} (${k.prev != null ? (k.value - k.prev).toFixed(2) : "—"})</div>${k.live ? `<div class="asof">체결 ${escapeHtml(String(k.traded_at || "").replace("T", " ").slice(5, 19))} · <span data-ago="${escapeHtml(liveData.server_time || "")}"></span> 갱신</div>` : ""}</div>` : ""}
+    ${lq ? `<table>${tr({ name: "KOSDAQ", value: lq.value, change_pct: lq.change_pct })}</table>` : ""}
     <div class="grp">참고 미국 지수 ${us[0]?.date ? `· ${escapeHtml(us[0].date)}` : ""}</div>
     <table>${us.map(tr).join("")}</table>
     <div class="grp">거시 지표</div>
     <table>${mc.map(tr).join("")}</table>
     ${flow?.foreign_net_krw_bn != null ? `<div class="grp">외국인 수급 ${flow.date ? `· ${escapeHtml(flow.date)}` : ""}</div><table><tr><td class="nm">KOSPI 외국인 순매수</td><td class="val"></td><td class="chg ${flow.direction === "buy" ? "up" : "down"}">${Number(flow.foreign_net_krw_bn).toLocaleString()}억</td></tr></table>` : ""}
-    <div class="foot">SOX는 KOSPI와 방향 일치율이 가장 높은 지수입니다. 10분마다 갱신.</div>`;
+    <div class="foot">KOSPI·KOSDAQ: 네이버 증권 마지막 체결가(장중 30초마다). 미국·거시: Yahoo Finance(10분마다, 지연 시세). SOX는 KOSPI와 방향 일치율이 가장 높은 지수입니다.</div>`;
+  updateAges();
 }
 
 let kospiSeries = null;
@@ -399,7 +452,11 @@ function renderMeta() {
   const box = $("#runMeta");
   if (!lastMeta) { box.textContent = ""; return; }
   const label = lastMeta.mode === "demo" ? "Mock 데모 결과" : "마지막 실제 분석";
-  box.textContent = `${label} · ${lastMeta.saved_at.replace("T", " ")}`;
+  box.textContent = `${label} · ${lastMeta.saved_at.replace("T", " ")} · `;
+  const ago = document.createElement("span");
+  ago.setAttribute("data-ago", lastMeta.saved_at);
+  ago.textContent = agoText(lastMeta.saved_at);
+  box.appendChild(ago);
 }
 
 function renderInputs() {
@@ -543,7 +600,7 @@ function perfRow(label, p, bold) {
   const f = (v, d = 2) => (typeof v === "number" ? v.toFixed(d) : "—");
   return `<tr${bold ? ' style="font-weight:600"' : ""}><td>${escapeHtml(label)}</td>
     <td class="num ${typeof p.total_return_pct === "number" ? (p.total_return_pct >= 0 ? "up" : "down") : ""}">${f(p.total_return_pct)}%</td>
-    <td class="num">${p.sharpe_annual == null ? "—" : f(p.sharpe_annual)}</td>
+    <td class="num">${p.sharpe_annual == null || (p.days || 0) < 20 ? '<span style="color:var(--text-muted)">표본 부족</span>' : f(p.sharpe_annual)}</td>
     <td class="num">${f(p.max_drawdown_pct)}%</td>
     <td class="num">${p.win_rate == null ? "—" : Math.round(p.win_rate * 100) + "%"}</td>
     <td class="num">${p.traded_days ?? "—"}/${p.days ?? "—"}</td></tr>`;
@@ -602,7 +659,7 @@ async function loadPaper() {
   box.className = "";
   const won = v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 }) + "원";
   const eq = s.equity_curve.map(x => (x.equity / s.initial_cash - 1) * 100);
-  const tiles = [["평가금액", won(s.equity), s.total_return_pct >= 0 ? "up" : "down", `${fmtPct(s.total_return_pct)} (${s.pnl >= 0 ? "+" : ""}${won(s.pnl)})`],
+  const tiles = [["평가금액", won(s.equity), s.total_return_pct > 0 ? "up" : s.total_return_pct < 0 ? "down" : "", `${fmtPct(s.total_return_pct)} (${s.pnl >= 0 ? "+" : ""}${won(s.pnl)})`],
                  ["현금", won(s.cash), "", `보유 ${Object.entries(s.holdings || {}).map(([t, q]) => `${t.startsWith("069500") ? "KODEX200" : "인버스"} ${q}주`).join(", ") || "없음"}`],
                  ["샤프 / MDD", `${s.sharpe_annual ?? "—"} / ${s.max_drawdown_pct}%`, "", `승률 ${s.win_rate == null ? "—" : Math.round(s.win_rate * 100) + "%"}`],
                  ["거래", `${s.trades}건`, "", `수수료+슬리피지 ${won(s.fees)} · ${s.days}일`]];
@@ -615,7 +672,7 @@ async function loadPaper() {
     <div class="section-label">최근 체결</div>
     <table class="stat-table"><thead><tr><th>일자</th><th>종목</th><th class="num">매매</th><th class="num">수량</th><th class="num">체결가</th><th class="num">수수료</th></tr></thead>
     <tbody>${(s.recent_trades || []).map(t => `<tr><td>${escapeHtml(t.date)}</td><td>${t.ticker.startsWith("069500") ? "KODEX 200" : "KODEX 인버스"}</td><td class="num ${t.side === "buy" ? "up" : "down"}">${t.side === "buy" ? "매수" : "매도"}</td><td class="num">${t.qty}</td><td class="num">${Number(t.price).toLocaleString()}</td><td class="num">${won(t.fee)}</td></tr>`).join("")}</tbody></table>
-    <div class="delta" style="color:var(--text-muted)">가상 체결입니다. 아침 분석의 포지션 비중을 그날 ETF 시가에 맞추고 종가로 평가하며, 다음 날 다시 조정합니다.</div>`;
+    <div class="delta" style="color:var(--text-muted)">가상 체결입니다. 아침 분석의 포지션 비중대로 ETF를 사고팔아(분석이 08:40 전에 끝나면 장전 시간외 전일 종가, 아니면 시가 체결) 종가로 평가하며, 다음 날 다시 조정합니다.</div>`;
 }
 
 function renderBaselines() {
@@ -981,4 +1038,6 @@ function initTabs() {
   window.addEventListener("hashchange", () => activateTab((location.hash || "").replace("#", "")));
 }
 
-document.addEventListener("DOMContentLoaded", () => { initTheme(); initTabs(); init(); loadKospi(); loadMarket(); loadPaper(); setInterval(loadMarket, 600000); });
+document.addEventListener("DOMContentLoaded", () => { initTheme(); initTabs(); init(); loadKospi(); loadMarket(); loadPaper(); setInterval(loadMarket, 600000);
+  tickClock(); setInterval(tickClock, 1000); loadLive(); scheduleLive();
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadLive(); }); });

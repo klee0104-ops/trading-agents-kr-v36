@@ -8,6 +8,7 @@ for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do 
 python cli.py verify >> "logs\마감채점_%TODAY%.log" 2>&1
 python cli.py review-now >> "logs\마감채점_%TODAY%.log" 2>&1
 python cli.py export-site >> "logs\마감채점_%TODAY%.log" 2>&1
+if errorlevel 1 exit /b 1
 rem 읽기 전용 페이지를 날짜별로 보관 (site\archive\index_YYYYMMDD.html)
 if not exist site\archive mkdir site\archive
 copy /y site\index.html "site\archive\index_%TODAY%.html" >nul

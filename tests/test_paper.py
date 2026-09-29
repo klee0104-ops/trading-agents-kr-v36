@@ -31,3 +31,29 @@ def test_unstarted_account_summary_has_displayable_balance():
     assert s['days'] == s['trades'] == s['pnl'] == s['total_return_pct'] == s['fees'] == 0
     assert s['holdings'] == {} and s['recent_trades'] == []
     assert s['sharpe_annual'] is None and s['max_drawdown_pct'] is None
+
+
+def test_paper_entry_prev_close_vs_open():
+    etf = {"long": {"ticker": "069500.KS", "open": 10300, "close": 10400, "prev_close": 10000},
+           "short": {"ticker": "114800.KS", "open": 4850, "close": 4800, "prev_close": 5000}}
+    a = PaperAccount(None, 10_000_000); b = PaperAccount(None, 10_000_000)
+    da = a.settle_day("2026-09-29", 1.0, etf, entry="prev_close")
+    db = b.settle_day("2026-09-29", 1.0, etf, entry="open")
+    assert da["entry"].startswith("장전") and db["entry"] == "시가"
+    assert da["day_return_pct"] > db["day_return_pct"] > 0   # 갭(+3%)까지 먹는 쪽이 더 큼
+
+
+def test_kr_daily_parse_and_merge():
+    from data.kr_daily import parse_daily, merge_series
+    rows = parse_daily([{"localTradedAt": "2026-09-29", "closePrice": "6,872.70", "compareToPreviousClosePrice": "-17.04",
+                         "openPrice": "6,844.41", "highPrice": "6,877.07", "lowPrice": "6,834.82"},
+                        {"localTradedAt": "2026-09-28", "closePrice": "6,889.74", "compareToPreviousClosePrice": "-191.18",
+                         "openPrice": "7,000", "highPrice": "7,010", "lowPrice": "6,880"}])
+    assert rows[0]["date"] == "2026-09-28" and rows[0]["prev_close"] == 7080.92
+    from datetime import date
+    d, c, h, l, added = merge_series(["2026-09-22", "2026-09-23"], [7017.91, 7080.92], rows, as_of=date(2026, 9, 28),
+                                     highs=[1, 2], lows=[1, 2])
+    assert added == ["2026-09-28"] and c[-1] == 6889.74 and len(h) == 3
+    # 중간 누락 + 오늘 장중 행 제거
+    d2, c2, _, _, added2 = merge_series(["2026-09-23", "2026-09-29"], [7080.92, 6865.0], rows, drop_after="2026-09-28")
+    assert d2 == ["2026-09-23", "2026-09-28"] and c2[-1] == 6889.74 and added2 == ["2026-09-28"]

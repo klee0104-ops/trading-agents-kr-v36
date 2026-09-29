@@ -173,6 +173,39 @@ def latest():
 _KOSPI_CACHE: dict = {}
 
 
+@app.route("/api/live")
+def market_live():
+    """(V3.26) 실시간에 가까운 국내 지수(네이버 증권 일별 시세의 오늘 행 = 마지막 체결가). 20초 캐시, LLM 미사용.
+    보기 전용 모드에서도 허용(읽기만). 실패하면 502 — 화면은 기존 시장 현황판을 그대로 둔다."""
+    import time as _t
+    from data.sessions import kst_now, market_status
+    hit = _MARKET_CACHE.get("live")
+    if hit and _t.time() - hit[0] < 20:
+        return jsonify(hit[1])
+    try:
+        from data.kr_daily import fetch_daily
+        now = kst_now()
+        out = {"server_time": now.strftime("%Y-%m-%dT%H:%M:%S"), "status": market_status(now), "rows": []}
+        for code, name in (("KOSPI", "KOSPI"), ("KOSDAQ", "KOSDAQ")):
+            try:
+                rows = fetch_daily(code, "index", include_intraday=True)
+            except Exception:  # noqa: BLE001 — 한 지수 실패는 건너뛴다
+                continue
+            if not rows:
+                continue
+            r = rows[-1]
+            chg = round((r["close"] / r["prev_close"] - 1) * 100, 2) if r.get("prev_close") else None
+            out["rows"].append({"name": name, "value": r["close"], "prev": r.get("prev_close"), "change_pct": chg,
+                                "date": r["date"], "traded_at": r.get("traded_at") or r["date"],
+                                "is_today": r["date"] == str(now.date())})
+        if not out["rows"]:
+            raise RuntimeError("국내 지수 시세를 가져오지 못했습니다")
+    except Exception as e:  # noqa: BLE001
+        return _safe_error(e, 502)
+    _MARKET_CACHE["live"] = (_t.time(), out)
+    return jsonify(out)
+
+
 @app.route("/api/kospi")
 def kospi_history():
     """(V3.18) 차트용 KOSPI 최근 종가 (yfinance, 10분 캐시, LLM 미사용). 보기 전용 모드에서도 허용."""
@@ -222,6 +255,19 @@ def market_board():
                          "change_pct": round((last / prev - 1) * 100, 2), "date": str(c.index[-1].date()),
                          "is_today": c.index[-1].date() == _d.today()})
         quote("KOSPI", KR_INDEX_TICKER, "kr")
+        try:  # (V3.22) Yahoo 의 KOSPI 가 늦으면(최근 거래일 누락) 네이버 일별(장중 포함)로 대체
+            from data.kr_daily import fetch_daily
+            nv = fetch_daily("KOSPI", "index", include_intraday=True)
+            if nv:
+                last_nv = nv[-1]
+                kr = next((r for r in rows if r["group"] == "kr"), None)
+                if kr is None or last_nv["date"] > kr["date"]:
+                    rows = [r for r in rows if r["group"] != "kr"]
+                    rows.insert(0, {"name": "KOSPI", "group": "kr", "value": last_nv["close"], "prev": last_nv["prev_close"],
+                                    "change_pct": round((last_nv["close"] / last_nv["prev_close"] - 1) * 100, 2) if last_nv["prev_close"] else None,
+                                    "date": last_nv["date"], "is_today": last_nv["date"] == str(_d.today())})
+        except Exception:  # noqa: BLE001
+            pass
         for n, tk in US_TICKERS.items():
             quote(n, tk, "us")
         for n, tk in MACRO_TICKERS.items():

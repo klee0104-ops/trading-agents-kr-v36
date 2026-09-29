@@ -207,11 +207,15 @@ class MarketDataProvider:
         if hist.empty:
             raise DataAccessError(f"KOSPI {after_date} 전후 데이터를 가져오지 못했습니다")
         close = hist["Close"].squeeze()
-        dates = [d.date() for d in close.index]
+        sdates = [str(d.date()) for d in close.index]
+        closes = [float(v) for v in close.tolist()]
+        sup = self._supplement_kospi({"dates": sdates, "closes": closes}, after_date + timedelta(days=20), 400)
+        dates = [date.fromisoformat(x) for x in sup["dates"]]
+        closes = sup["closes"]
         i = first_session_after(dates, after_date)
         if i is None:
             raise DataAccessError(f"{after_date} 이후 KOSPI 거래일 데이터가 아직 없습니다")
-        change = float((close.iloc[i] / close.iloc[i - 1] - 1) * 100)
+        change = float((closes[i] / closes[i - 1] - 1) * 100)
         return {"actual_date": str(dates[i]), "change_pct": round(change, 4),
                 "actual_direction": "up" if change >= 0 else "down"}
 
@@ -232,29 +236,39 @@ class MarketDataProvider:
             c = hist[name]
             c = c.squeeze() if hasattr(c, "squeeze") else c
             return [float(v) for v in c.tolist()]
-        return {"dates": [str(d.date()) for d in hist.index], "closes": col("Close"),
-                "highs": col("High"), "lows": col("Low")}
+        out = {"dates": [str(d.date()) for d in hist.index], "closes": col("Close"),
+               "highs": col("High"), "lows": col("Low")}
+        return self._supplement_kospi(out, as_of, sessions)
+
+    def _supplement_kospi(self, out: dict, as_of: date, sessions: int) -> dict:
+        """(V3.22) Yahoo 에 최근 거래일이 빠졌으면 네이버 일별 시세로 채운다. 백테스트 모드에선 하지 않는다."""
+        if self.backtest_mode:
+            return out
+        try:
+            from data.kr_daily import fetch_daily, merge_series
+            from data.sessions import kst_now
+            from datetime import timedelta as _td
+            now = kst_now()
+            closed = now.hour > 15 or (now.hour == 15 and now.minute >= 40)
+            # 장 마감 전이면 오늘 행(Yahoo 장중 값 포함)은 뺀다 — 종가만 쓴다
+            drop_after = None if closed else str(now.date() - _td(days=1))
+            extra = fetch_daily("KOSPI", "index")
+            d, c, h, l, added = merge_series(out["dates"], out["closes"], extra, as_of, out.get("highs"), out.get("lows"),
+                                             drop_after=drop_after)
+            if added or len(d) != len(out["dates"]):
+                out = {"dates": d[-sessions:], "closes": c[-sessions:], "highs": (h or [])[-sessions:],
+                       "lows": (l or [])[-sessions:], "supplemented": added}
+        except Exception:  # noqa: BLE001 — 보충 실패는 무시(Yahoo 값 그대로)
+            pass
+        return out
 
     def fetch_etf_returns(self, session_date: date) -> dict:
-        """(V3.14) 채점용: 롱(KODEX200)·쇼트(KODEX 인버스) ETF의 session_date 실제 등락률(%).
-        하나라도 못 받으면 그 키는 없다 → 호출측이 지수로 근사."""
-        try:
-            import yfinance as yf
-        except ImportError as e:
-            raise DataAccessError("yfinance가 필요합니다: pip install yfinance") from e
-        from datetime import timedelta
-        from execution.position import LONG_ETF, SHORT_ETF
+        """(V3.14) 채점용: 롱(KODEX200)·쇼트(KODEX 인버스) ETF의 session_date 종가 기준 등락률(%).
+        (V3.22) fetch_etf_ohlc 를 재사용해 Yahoo 누락 시 네이버로 보충. 못 받은 쪽 키는 없다 → 지수로 근사."""
         out = {}
-        for key, tk in (("long", LONG_ETF), ("short", SHORT_ETF)):
-            try:
-                h = yf.download(tk, start=session_date - timedelta(days=15), end=session_date + timedelta(days=1),
-                                progress=False)
-                h = h[h.index.date <= session_date]
-                if len(h) >= 2 and h.index[-1].date() == session_date:
-                    c = h["Close"].squeeze()
-                    out[key] = round(float((c.iloc[-1] / c.iloc[-2] - 1) * 100), 4)
-            except Exception:  # noqa: BLE001
-                continue
+        for key, row in (self.fetch_etf_ohlc(session_date) or {}).items():
+            if row.get("prev_close"):
+                out[key] = round((row["close"] / row["prev_close"] - 1) * 100, 4)
         return out
 
     def fetch_etf_ohlc(self, session_date: date) -> dict:
@@ -276,7 +290,16 @@ class MarketDataProvider:
                                 "close": round(float(h["Close"].squeeze().iloc[-1]), 2),
                                 "prev_close": round(float(h["Close"].squeeze().iloc[-2]), 2)}
             except Exception:  # noqa: BLE001
-                continue
+                pass
+            if key not in out and not self.backtest_mode:  # (V3.22) Yahoo 누락 시 네이버 일별 시세
+                try:
+                    from data.kr_daily import fetch_daily
+                    row = next((r for r in fetch_daily(tk.split(".")[0], "stock") if r["date"] == str(session_date)), None)
+                    if row and row.get("open") and row.get("prev_close"):
+                        out[key] = {"ticker": tk, "open": row["open"], "close": row["close"], "prev_close": row["prev_close"],
+                                    "source": "naver"}
+                except Exception:  # noqa: BLE001
+                    pass
         return out
 
     def fetch_kospi_actual_direction(self, target_date: date) -> str:

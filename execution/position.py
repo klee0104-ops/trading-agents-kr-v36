@@ -27,18 +27,24 @@ SHORT_ETF = "114800.KS"      # KODEX 인버스
 def vol_scale(realized_vol_pct: Optional[float], target_vol_pct: float = TARGET_VOL_PCT,
               lo: float = 0.25, hi: float = 1.5) -> float:
     """목표변동성/실현변동성. 실현변동성이 없으면 1.0."""
-    if not realized_vol_pct or realized_vol_pct <= 0:
+    try:
+        v = float(realized_vol_pct) if realized_vol_pct is not None else None
+    except (TypeError, ValueError):
+        v = None
+    if not v or v != v or v <= 0 or v == float("inf"):  # (V3.25) NaN/무한대/음수 → 스케일 1.0 (예전엔 NaN 이 1.5배로)
         return 1.0
-    return max(lo, min(hi, target_vol_pct / float(realized_vol_pct)))
+    return max(lo, min(hi, target_vol_pct / v))
 
 
 def position_from_probability(up_probability: Optional[float], realized_vol_pct: Optional[float] = None,
                               *, target_vol_pct: float = TARGET_VOL_PCT, min_edge: float = MIN_EDGE,
                               kelly_fraction: float = KELLY_FRACTION, max_position: float = MAX_POSITION) -> dict:
     """상승확률(0~100) → 포지션(-1~+1). 반환에 이유를 함께 넣어 대시보드에 보인다."""
-    if up_probability is None:
+    from rules.outlook import clamp_probability
+    if clamp_probability(up_probability) is None:  # (V3.25) None/NaN/무한대/문자 → 현금
         return {"position": 0.0, "edge": None, "vol_scale": None, "instrument": "cash",
                 "reason": "확률 없음 → 현금"}
+    up_probability = float(up_probability)
     p = max(0.0, min(1.0, float(up_probability) / 100.0))
     edge = 2 * p - 1                      # Kelly f* (1:1 배당)
     vs = vol_scale(realized_vol_pct, target_vol_pct)

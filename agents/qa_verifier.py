@@ -25,6 +25,8 @@ QA_DEBATE_SYSTEM_PROMPT = """당신은 QA 검증(품질보증) 에이전트입�
 각 근거 항목에 대해:
 - 소스 자료에 실질적으로 등장하는 내용이면 verified: true
 - 소스 자료에 없거나, 소스와 명백히 다른 수치/주장이면 verified: false
+- 근거에 붙은 ID([M1], [N3] 등)가 가리키는 자료와 내용이 다르면 verified: false
+- 뉴스 근거인데 매체·ID가 없거나, 목록에 없는 논문·저자·연도를 인용했으면 verified: false
 
 반드시 JSON만 출력:
 {"results": [{"evidence": "...", "verified": true, "note": "짧은 이유"}]}"""
@@ -54,6 +56,10 @@ def verify_debate_evidence(llm: LLMClient, transcript: list[dict],
     if quant:
         from rules.quant import quant_text
         quant_src = quant_text(quant)
+    registry = analyst_report.get("_registry") or []
+    if registry:  # (V3.24) ID 붙은 근거 자료 목록이 원 소스다 (정량 지표 포함)
+        from rules.citations import registry_text
+        quant_src = "\n" + registry_text(registry)
     source_text = (
         f"[분석가 리포트]\n{analyst_report.get('summary', '')}\n"
         f"주요 포인트: {', '.join(analyst_report.get('notable_points', []))}\n"
@@ -88,11 +94,24 @@ def verify_debate_evidence(llm: LLMClient, transcript: list[dict],
                         unverified.append(c["text"])
             verified_count = max(0, len(evidence) - len(unverified))
 
+        # (V3.24) 출처 규칙: 근거 ID가 없거나, 목록에 없는 ID거나, 수치가 인용 자료와 다르면
+        # LLM 판정과 무관하게 미검증으로 내린다 (코드 판정이 우선).
+        citation_rejected: list[dict] = []
+        if registry:
+            from rules.citations import check_points
+            for c in check_points([str(e) for e in evidence], registry):
+                if c["status"] != "ok":
+                    citation_rejected.append({"evidence": c["text"], "reason": c["reason"]})
+                    if c["text"] not in unverified:
+                        unverified.append(c["text"])
+            verified_count = max(0, len(evidence) - len(unverified))
+
         qa_results.append({
             "round": turn.get("round"), "stance": turn.get("stance"),
             "verified_count": verified_count, "total_count": len(evidence),
             "unverified": unverified, "no_evidence_cited": False,
             "quant_contradicted": quant_contra,
+            "citation_rejected": citation_rejected,
         })
 
     return qa_results

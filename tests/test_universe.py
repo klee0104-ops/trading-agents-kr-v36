@@ -45,7 +45,7 @@ def test_fetch_titles_groups_by_stock_and_caps(monkeypatch):
     monkeypatch.setattr("data.news_collector.fetch_news_for_range", fake_fetch)
     uni = [{"code": "005930", "name": "삼성전자", "core": True}, {"code": "005380", "name": "현대차", "core": False}]
     titles = specialists.fetch_recent_news_titles(date(2026, 9, 28), universe=uni)
-    assert titles[0].startswith("[2026-09-28][삼성전자] ")
+    assert titles[0].startswith("[2026-09-28][삼성전자][src] ")  # (V3.24) 세 번째 칸 = 매체
     assert sum(1 for t in titles if "[삼성전자]" in t) == 15 and sum(1 for t in titles if "[현대차]" in t) == 6
 
 

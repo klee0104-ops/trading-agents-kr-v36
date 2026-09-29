@@ -19,7 +19,7 @@ from security.secret_store import PROJECT_ROOT, SECRET_PATTERNS, mask
 # 배포/공유 zip에서 항상 제외할 것들
 EXCLUDE_DIRS = {"venv", ".venv", "__pycache__", ".pytest_cache", ".git", ".claude",
                 ".idea", ".vscode", "release", "node_modules", "site", ".review-backups"}
-EXCLUDE_FILES = [".env", ".env.*", "*.db", "*.sqlite", "memory_store.json", "demo_memory.json", "last_outcome.json",
+EXCLUDE_FILES = [".env", ".env.*", "*.db", "*.sqlite", "memory_store.json", "memory_store_superseded.json", "demo_memory.json", "last_outcome.json",
                  "실행로그.txt", "진단결과.txt", "paper_account.json", "lessons.json",
                  "backtest_results*.json", "*_log.txt", "아침요약.txt", "*.bak", "*.pdf", "flow_debug.html",
                  "*.pyc", "*.log", "*.zip", "*.pem", "*.key"]

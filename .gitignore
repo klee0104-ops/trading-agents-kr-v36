@@ -40,3 +40,7 @@ flow_debug.html
 .review-backups/
 .codex/
 .agents/
+
+memory_store_superseded.json
+logs/
+*.tmp

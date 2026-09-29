@@ -113,10 +113,11 @@ def fetch_press_feeds(timeout: int = 10) -> dict[str, str]:
 
 
 def fetch_titles_via_rss(stocks: list[dict], as_of: date, days: int, per_core: int, per_extra: int) -> list[str]:
-    """Google 뉴스 RSS(종목별 검색) + 언론사 피드(종목명 필터). 형식 "[날짜][종목명] 제목"."""
+    """Google 뉴스 RSS(종목별 검색) + 언론사 피드(종목명 필터). 형식 "[날짜][종목명][매체] 제목"."""
     from data.news_search import build_query
     start = as_of - timedelta(days=days)
     press = fetch_press_feeds()
+    from agents.specialists import _press
     titles: list[str] = []
     for st in stocks:
         limit = per_core if st.get("core") else per_extra
@@ -125,13 +126,16 @@ def fetch_titles_via_rss(stocks: list[dict], as_of: date, days: int, per_core: i
             items = fetch_google_news(st["name"], start, as_of, query=build_query(st["name"]))
         except Exception:  # noqa: BLE001
             pass
-        for xml_text in press.values():
-            items += parse_rss(xml_text, st["name"], start, as_of, require_name=True)
+        for feed_name, xml_text in press.items():
+            for it in parse_rss(xml_text, st["name"], start, as_of, require_name=True):
+                if not it.source:  # (V3.24) 언론사 피드는 source 태그가 없으므로 피드명(매체)으로 채운다
+                    it.source = feed_name.split(" ")[0]
+                items.append(it)
         seen, uniq = set(), []
         for it in sorted(items, key=lambda x: (x.date, x.time), reverse=True):
             if it.title in seen:
                 continue
             seen.add(it.title)
             uniq.append(it)
-        titles += [f"[{it.date}][{st['name']}] {it.title}" for it in uniq[:limit]]
+        titles += [f"[{it.date}][{st['name']}][{_press(it)}] {it.title}" for it in uniq[:limit]]
     return titles

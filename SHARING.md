@@ -1,5 +1,17 @@
 # 비공개 소스와 HTML 공유
 
+## 고정 주소 자동 갱신 (2026-09-29)
+
+공유 주소: https://klee0104-ops.github.io/trading-agents-kr-report/
+
+소스 저장소 `trading-agents-kr-v36`는 Private으로 유지하며 Pages를 켜지 않는다. 별도 Public 저장소 `trading-agents-kr-report`에는 보안 검사한 `index.html`과 `.nojekyll`만 둔다. 이 주소와 게시된 결과는 인터넷에서 누구나 열 수 있다. 검색 제외 표시는 접근 통제가 아니다. 공개 Git 이력에도 과거 공유 결과가 남는다.
+
+`sharing_public.json`의 `enabled: true`이면 `python cli.py export-site`가 HTML 생성 후 자동 업로드한다. 기존 아침 분석·마감 채점 배치도 이 명령을 사용하므로 같은 흐름에 연결된다. `false`로 바꾸면 로컬 HTML만 생성한다. 생성/검사/업로드 중 실패하면 명령은 실패하고 공개 페이지는 이전 버전을 유지한다. 업로드 후 GitHub Pages 반영에 수 분 걸릴 수 있다.
+
+사이트는 5분마다 새로고침하여 새 게시물을 가져온다. 브라우저에서 분석하거나 로컬 PC에 접속하지 않는다. PC가 꺼졌거나 로그아웃·네트워크 장애·GitHub 인증 만료로 작업이 실행되지 않으면 새 데이터는 게시되지 않는다. 기존 다운로드 HTML/ZIP은 자동 교체되지 않으므로 고정 주소를 전달한다.
+
+GitHub CLI 인증은 Windows 자격 증명 저장소를 사용한다. 프로젝트 파일·HTML·로그에 토큰을 쓰지 않는다. 사용자 계정의 `gh` 인증으로 고정 대상 저장소의 index.html만 업로드하며 `.env`, 원본 계좌 JSON, DB, 로그, 소스는 전송하지 않는다. 실제 HTML에 CSP 스크립트 해시와 외부 연결 차단을 적용하고 활성 키뿐 아니라 환경변수/.env의 가려진 키도 검사한다.
+
 GitHub에는 소스만 Private 저장소로 보관한다. 협업자를 추가하지 않으면 일반 사용자는 열람할 수 없다. API 키는 내 PC 자격 증명 관리자에 보관하고 .env, DB, 계좌, 로그, 분석 결과, site/를 업로드하지 않는다.
 
 ## 파일 전달

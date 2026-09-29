@@ -18,7 +18,7 @@ class _P(MarketDataProvider):
     def fetch_kospi_history(self, as_of, sessions=260):
         c = self._c[-sessions:]; return {"dates": [str(as_of)] * len(c), "closes": c, "highs": [x * 1.004 for x in c], "lows": [x * 0.996 for x in c]}
     def fetch_kospi_session_after(self, after_date):
-        return {"actual_date": "2026-09-29", "change_pct": -1.8, "actual_direction": "down"}
+        return {"actual_date": "2026-09-26", "change_pct": -1.8, "actual_direction": "down"}
     def fetch_stock_actual(self, name, target, after_date=None):
         raise RuntimeError("skip")
     def fetch_etf_returns(self, d):
@@ -90,7 +90,9 @@ def test_review_now_observational_lesson(monkeypatch, tmp_path):
 
     class _Today(_P):
         def fetch_kospi_history(self, as_of, sessions=260):
-            return {"dates": [str(_d.today() - __import__("datetime").timedelta(days=1)), str(_d.today())],
+            from data.sessions import kst_now
+            t = kst_now().date()
+            return {"dates": [str(t - __import__("datetime").timedelta(days=1)), str(t)],
                     "closes": [7000.0, 6811.0], "highs": [7000, 6900], "lows": [6800, 6800]}
     pipe.data_provider = _Today()
     r = pipe.review_now()
@@ -109,3 +111,20 @@ def test_pending_today_only_after_close():
 def _rec_simple(t):
     from memory.store import PredictionRecord
     return PredictionRecord(target_date=t, run_date=t, direction="up", confidence="보통")
+
+
+def test_legacy_record_scored_with_direction_not_cash():
+    from memory.store import PredictionRecord
+    m = MemoryStore(None)
+    m.save(PredictionRecord(target_date="2026-07-29", run_date="2026-07-28", direction="down", confidence="보통"))
+    m.mark_verified("2026-07-29", "down", actual_change_pct=-2.0)
+    r = m.all_records()[0]
+    assert r["strategy_return_pct"] == round(2.0 - 0.10, 4) and r["position_legacy"] is True
+
+
+def test_recompute_legacy_returns():
+    m = MemoryStore(None)
+    m._write({"2026-07-29": {"target_date": "2026-07-29", "direction": "down", "verified": True, "position": None,
+                             "actual_change_pct": -2.0, "strategy_return_pct": 0.0}})
+    assert m.recompute_legacy_returns() == 1
+    assert m.all_records()[0]["strategy_return_pct"] == 1.9

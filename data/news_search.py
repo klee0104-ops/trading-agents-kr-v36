@@ -115,13 +115,14 @@ def naver_search_available() -> bool:
 
 def fetch_titles_via_search(stocks: list[dict], as_of: date, days: int, per_core: int, per_extra: int,
                             display: Optional[int] = None) -> list[str]:
-    """공식 검색 API 로 종목 목록 전체의 제목을 모은다. 형식 "[날짜][종목명] 제목" (기존과 동일)."""
+    """공식 검색 API 로 종목 목록 전체의 제목을 모은다. 형식 "[날짜][종목명][매체] 제목" (기존과 동일)."""
     from config import Config
     from security.secret_store import get_api_key
     cid, csec = get_api_key("naver_id"), get_api_key("naver_secret")
     if not (cid and csec):
         return []
     start = as_of - timedelta(days=days)
+    from agents.specialists import _press
     titles: list[str] = []
     for st in stocks:
         limit = per_core if st.get("core") else per_extra
@@ -132,5 +133,5 @@ def fetch_titles_via_search(stocks: list[dict], as_of: date, days: int, per_core
             raise
         except Exception:  # noqa: BLE001 — 종목 하나 실패는 건너뛴다
             continue
-        titles += [f"[{it.date}][{st['name']}] {it.title}" for it in items[:limit]]
+        titles += [f"[{it.date}][{st['name']}][{_press(it)}] {it.title}" for it in items[:limit]]
     return titles

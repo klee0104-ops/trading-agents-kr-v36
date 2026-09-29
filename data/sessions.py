@@ -23,7 +23,7 @@ def first_session_after(index_dates: list[date], after: date) -> Optional[int]:
 from datetime import datetime, timedelta, timezone, time as dtime
 
 KST = timezone(timedelta(hours=9))  # 한국은 서머타임이 없어 고정 오프셋으로 충분 (tzdata 불필요)
-DEFAULT_CUTOFF = dtime(8, 50)       # 이 시각 이전 실행 = "오늘 장" 예측 (09:00 개장 전 여유 10분)
+DEFAULT_CUTOFF = dtime(9, 0)        # (V3.22) 이 시각(개장) 이전에 저장된 실행 = "오늘 장" 예측. PC를 늦게 켜 08:5x에 돌아도 오늘 장을 대상으로 한다
 
 
 def kst_now() -> datetime:
@@ -51,3 +51,19 @@ def decide_score_after(now: datetime, latest_us_session: Optional[date] = None,
     if latest_us_session and latest_us_session > base:
         base = latest_us_session
     return base
+
+
+def market_status(now=None) -> dict:
+    """(V3.26) 국내 정규장 상태 (KST). 공휴일은 모른다 — 평일 휴장일도 '장중'으로 보일 수 있어 화면에 체결 시각을 함께 보인다.
+    pre: 09:00 전, open: 09:00~15:30, closing: 15:30~15:40(종가 확정 대기), closed: 15:40 이후, weekend: 토·일."""
+    now = now or kst_now()
+    if now.weekday() >= 5:
+        return {"code": "weekend", "label": "휴장(주말)"}
+    m = now.hour * 60 + now.minute
+    if m < 9 * 60:
+        return {"code": "pre", "label": "장 시작 전"}
+    if m < 15 * 60 + 30:
+        return {"code": "open", "label": "장중"}
+    if m < 15 * 60 + 40:
+        return {"code": "closing", "label": "종가 확정 중"}
+    return {"code": "closed", "label": "장 마감"}

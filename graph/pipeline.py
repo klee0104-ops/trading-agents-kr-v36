@@ -94,9 +94,14 @@ class TradingAgentsPipeline:
         # 2) 분석가 4명 (V3.9: 기술 / 거시·수급 / 반도체 / 뉴스·심리) → 코드 다수결 통합 리포트
         news_universe = self._news_universe()
         news_titles = self._news_titles(snapshot, news_universe)
-        spec = run_all_specialists(self.llm, snapshot, market_analysis, news_titles)
+        # 2-0) (V3.24) 근거 자료 목록: 모든 데이터·지표·뉴스에 ID와 출처(데이터원·매체·공식 논문)를 붙인다.
+        #      분석가·Bull/Bear·QA 는 이 ID로만 인용하고, 코드가 ID·수치를 대조해 어긋나면 폐기한다.
+        from rules.citations import build_registry, public_registry
+        source_registry = build_registry(snapshot, quant, news_titles, LAST_NEWS_SOURCE.get("source"))
+        spec = run_all_specialists(self.llm, snapshot, market_analysis, news_titles, registry=source_registry)
         analyst_reports = spec["reports"]
         analyst_report = spec["combined"]
+        analyst_report["_registry"] = source_registry  # 토론·QA 전용 (기록 전에 뺀다: 뉴스 제목 포함)
         if quant:  # 토론자(Bull/Bear)도 같은 지표를 보고 인용하게 한다
             from rules.quant import quant_text
             analyst_report["quant_context"] = quant_text(quant)
@@ -117,6 +122,7 @@ class TradingAgentsPipeline:
         # 웹 검색 없이 "이미 가진 자료와 일치하는지"만 보므로 비용이 저렴하다.
         debate_qa = verify_debate_evidence(self.llm, transcript, analyst_report, similar_cases_context,
                                            quant=quant)
+        analyst_report.pop("_registry", None)
 
         # 3-2) 중재자 (V3.8): 토론을 정리한다 — 확인된 근거만 남기고 쟁점/합의/소음을 분리.
         # 미해결이면 트레이더에 "확률 50 근처" 권고(중립 신호). 방향은 정하지 않는다.
@@ -230,6 +236,7 @@ class TradingAgentsPipeline:
             "analyst_reports": analyst_reports,
             "news_titles": news_titles,
             "news_source": LAST_NEWS_SOURCE.get("source"),
+            "source_registry": public_registry(source_registry),  # 뉴스 제목 제외, ID·출처만
             "news_universe": [{"code": u["code"], "name": u["name"], "core": u.get("core", False),
                                "rank": u.get("rank")} for u in news_universe],
             "stock_facts": stock_facts,
@@ -309,7 +316,10 @@ class TradingAgentsPipeline:
             today_flow = (snapshot.kr_flow or {}).get("foreign_net_krw_bn")
             if today_flow is not None:
                 flows = flows + [float(today_flow)]
-            return compute_indicators(hist["closes"], hist.get("highs"), hist.get("lows"), flow_history=flows)
+            ind = compute_indicators(hist["closes"], hist.get("highs"), hist.get("lows"), flow_history=flows)
+            if ind is not None and hist.get("dates"):
+                ind["history_last_date"] = str(hist["dates"][-1])[:10]  # (V3.25) 지표가 실제로 반영한 마지막 거래일
+            return ind
         except Exception as e:  # noqa: BLE001
             print(f"[정량 지표 계산 실패] {e}")
             return None
@@ -516,6 +526,17 @@ class TradingAgentsPipeline:
                                       actual_change_pct=k.get("change_pct"), etf_returns=etf)
             self._postmortem(rec["target_date"])
             self._paper_settle(rec, session)
+        self._paper_catch_up()
+
+    def _paper_catch_up(self) -> None:
+        """(V3.22) ETF 시세가 늦게 들어와 체결 못 한 날을 다음 채점 때 다시 시도."""
+        from datetime import date as _date
+        for r in sorted(self.memory.all_records(), key=lambda r: r.get("target_date", ""))[-10:]:
+            if r.get("verified") and r.get("position") is not None and r.get("actual_session_date"):
+                try:
+                    self._paper_settle(r, _date.fromisoformat(r["actual_session_date"][:10]))
+                except ValueError:
+                    continue
 
     def _paper_settle(self, rec: dict, session) -> None:
         """(V3.21) 가상 계좌: 그날 ETF 시가에 포지션대로 리밸런싱, 종가 평가. 실기록에서만(백테스트 제외)."""
@@ -530,50 +551,71 @@ class TradingAgentsPipeline:
             if acct.already_settled(str(session)):
                 return
             etf = fetch(session)
+            run_at = str(rec.get("run_at") or "")
+            early = len(run_at) >= 16 and run_at[:10] < str(session) or (run_at[:10] == str(session) and run_at[11:16] <= "08:40")
             day = acct.settle_day(str(session), rec.get("position") or 0.0, etf,
-                                  note=f"예측 {rec.get('direction')} p={rec.get('up_probability')}")
+                                  note=f"예측 {rec.get('direction')} p={rec.get('up_probability')}",
+                                  entry="prev_close" if early else "open")
             if day:
                 print(f"[가상 계좌] {session} 평가금액 {day['equity']:,.0f}원 ({day['day_return_pct']:+.2f}%), 누적 {day['total_return_pct']:+.2f}%")
         except Exception as e:  # noqa: BLE001
             print(f"[가상 계좌 생략] {e}")
 
-    def review_now(self) -> dict | None:
-        """(V3.20) 즉시 복기: 마지막 분석을 '오늘 실제 KOSPI 움직임'과 대조해 교훈을 남긴다.
-        대상일이 내일이라 정식 채점은 못 해도, 오늘 장 흐름이 예측과 어긋났을 때 바로 원인을 짚기 위한 관찰용.
-        정식 채점(적중률·수익률)에는 들어가지 않는다. 장 마감 전이면 현재가 기준(장중)으로 표시한다."""
+    def review_now(self, on: str | None = None) -> dict | None:
+        """(V3.22) 관찰 복기: 날짜 on(기본 오늘, KST)의 실제 KOSPI 움직임과 '그날 참고할 수 있었던 예측'을 대조해 교훈을 남긴다.
+        대상 예측 고르기: ① 대상일이 on 인 기록(정식 채점 전 미리보기) → ② on 에 실행된 기록(개장 뒤 실행이라 대상일이 다음 날)
+        → ③ 저장된 마지막 분석. 정식 채점(적중률·수익률)에는 들어가지 않고 lessons.json 에 '관찰'로 저장된다."""
         from memory.outcome_store import load_last_outcome
         from agents.reviewer import run_postmortem
-        last = load_last_outcome(Config.LAST_OUTCOME_PATH) or {}
-        o = last.get("outcome") or {}
-        kp = (o.get("final_result") or {}).get("kospi_prediction") or {}
-        if not kp.get("direction"):
-            print("[즉시 복기] 저장된 분석 결과가 없습니다.")
-            return None
+        from datetime import date as _date
         now = kst_now()
+        if on == "yesterday":
+            from datetime import timedelta as _td
+            day = now.date() - _td(days=1)
+            while day.weekday() >= 5:
+                day -= _td(days=1)
+        else:
+            day = _date.fromisoformat(on) if on else now.date()
+        recs = self.memory.all_records() + self.memory.superseded_records()
+        pick = next((r for r in recs if r.get("target_date") == str(day) and not r.get("verified")), None) \
+            or next((r for r in sorted(recs, key=lambda r: r.get("run_at") or r.get("run_date") or "", reverse=True)
+                     if r.get("run_date") == str(day) and r.get("target_date") != str(day)), None)
+        digest = (pick or {}).get("outcome_digest")
+        if pick is None or not digest:
+            o = (load_last_outcome(Config.LAST_OUTCOME_PATH) or {}).get("outcome") or {}
+            if pick is None:
+                kp0 = (o.get("final_result") or {}).get("kospi_prediction") or {}
+                if not kp0.get("direction"):
+                    print("[관찰 복기] 대조할 예측이 없습니다.")
+                    return None
+                pick = {"target_date": o.get("target_date"), "direction": kp0.get("direction"),
+                        "up_probability": kp0.get("up_probability"), "outlook": kp0.get("outlook"), "position": kp0.get("position")}
+            if not digest:
+                digest = self._digest_from_outcome(o) if o else {}
         try:
-            h = self.data_provider.fetch_kospi_history(now.date(), sessions=3)
+            h = self.data_provider.fetch_kospi_history(day, sessions=3)
         except Exception as e:  # noqa: BLE001
-            print(f"[즉시 복기] KOSPI 시세 조회 실패: {e}")
+            print(f"[관찰 복기] KOSPI 시세 조회 실패: {e}")
             return None
-        if len(h["closes"]) < 2 or h["dates"][-1] != str(now.date()):
-            print("[즉시 복기] 오늘 KOSPI 시세가 아직 없습니다.")
+        if len(h["closes"]) < 2 or h["dates"][-1] != str(day):
+            print(f"[관찰 복기] {day} KOSPI 시세가 아직 없습니다.")
             return None
         chg = round((h["closes"][-1] / h["closes"][-2] - 1) * 100, 2)
         actual_dir = "up" if chg >= 0 else "down"
-        intraday = not (now.hour > 15 or (now.hour == 15 and now.minute >= 40))
-        rec = {"target_date": str(now.date()), "direction": kp.get("direction"),
-               "up_probability": kp.get("up_probability"), "outlook": kp.get("outlook"),
-               "position": kp.get("position"), "actual_direction": actual_dir, "actual_change_pct": chg,
-               "strategy_return_pct": None, "correct": kp.get("direction") == actual_dir,
-               "actual_session_date": str(now.date()) + (" (장중)" if intraday else "")}
-        digest = self._digest_from_outcome(o)
+        intraday = day == now.date() and not (now.hour > 15 or (now.hour == 15 and now.minute >= 40))
+        rec = {"target_date": str(day), "direction": pick.get("direction"), "up_probability": pick.get("up_probability"),
+               "outlook": pick.get("outlook"), "position": pick.get("position"), "actual_direction": actual_dir,
+               "actual_change_pct": chg, "strategy_return_pct": None, "correct": pick.get("direction") == actual_dir,
+               "actual_session_date": str(day) + (" (장중)" if intraday else "")}
         pm = run_postmortem(self.llm, rec, digest)
-        lesson = {"target_date": str(now.date()), "direction": rec["direction"], "actual_direction": actual_dir,
+        lesson = {"target_date": str(day), "direction": rec["direction"], "actual_direction": actual_dir,
                   "correct": rec["correct"], "strategy_return_pct": None,
-                  "tags": (o.get("situation_tags") or []) + ["관찰"], "observational": True,
-                  "note": f"오늘 {chg:+.2f}% ({'장중' if intraday else '종가'}) 기준 관찰 복기 — 정식 채점 아님", **pm}
+                  "tags": list(pick.get("situation_tags") or []) + ["관찰"], "observational": True,
+                  "reviewed_record": pick.get("target_date"),
+                  "note": f"{day} KOSPI {chg:+.2f}% ({'장중' if intraday else '종가'}) vs 예측({pick.get('target_date')} 대상) — 관찰 복기, 정식 채점 아님",
+                  **pm}
         self.lessons.add(lesson)
-        print(f"[즉시 복기] 예측 {rec['direction']} vs 오늘 {chg:+.2f}% ({'장중' if intraday else '종가'}) → {pm.get('lesson')}")
+        print(f"[관찰 복기] {day}: 예측 {rec['direction']} vs 실제 {chg:+.2f}% → {pm.get('lesson')}")
         return lesson
 
     @staticmethod

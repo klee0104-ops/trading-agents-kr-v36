@@ -24,6 +24,8 @@ def clamp_probability(p) -> float | None:
         v = float(p)
     except (TypeError, ValueError):
         return None
+    if v != v or v in (float("inf"), float("-inf")):  # (V3.25) NaN/무한대 → 확률 없음 (예전엔 100%로 굳어 전액 롱)
+        return None
     if 0.0 <= v <= 1.0 and v != 0 and v != 1:  # 0.62처럼 소수로 준 경우
         v *= 100
     return max(0.0, min(100.0, round(v, 1)))

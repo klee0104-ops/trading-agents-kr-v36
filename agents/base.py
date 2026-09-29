@@ -246,6 +246,21 @@ class MockLLMClient(LLMClient):
         })
         return self._route(system, user)
 
+    @staticmethod
+    def _cite(user: str, name, kind: str = "M") -> str:
+        """(V3.24) 프롬프트의 근거 자료 목록에서 해당 항목의 ID를 찾아 ' [M3]' 형태로 붙인다. 없으면 빈 문자열."""
+        import re as _re
+        pat = rf"\[({kind}\d+)\] " + (_re.escape(name) + r"\b" if name else "")
+        m = _re.search(pat, user)
+        return f" [{m.group(1)}]" if m else ""
+
+    def _bear_evidence(self, user: str) -> str:
+        """자료에 VIX 가 있으면 VIX, 없으면(ID 목록이 있을 때) SOX 를 근거로 든다 — 없는 자료를 인용하지 않는 mock."""
+        vix = self._cite(user, "VIX")
+        if vix or not self._cite(user, "SOX"):
+            return f"VIX 등락 +2.00%{vix}"
+        return f"SOX 등락 +1.10%{self._cite(user, 'SOX')}"
+
     def _route(self, system: str, user: str) -> str:
         s = system.lower()
         # 주의: "bull"/"bear" 영단어로 체크하면 안 된다. 각 프롬프트가 상대방을
@@ -297,14 +312,14 @@ class MockLLMClient(LLMClient):
             return json.dumps({
                 "stance": "bear",
                 "argument": "VIX 상승과 밸류에이션 부담을 고려하면 단기 조정 가능성이 있습니다.",
-                "evidence": ["VIX +2.00%"],
+                "evidence": [self._bear_evidence(user)],
                 "confidence": 0.55
             }, ensure_ascii=False)
         if "낙관론자" in s:
             return json.dumps({
                 "stance": "bull",
                 "argument": "미국 반도체 지수 강세와 HBM 수요 확대가 국내 반도체주에 긍정적입니다.",
-                "evidence": ["SOX +1.10%"],
+                "evidence": [f"SOX 등락 +1.10%{self._cite(user, 'SOX')}"],
                 "confidence": 0.62
             }, ensure_ascii=False)
         if "risk" in s:
@@ -371,19 +386,19 @@ class MockLLMClient(LLMClient):
         if "거시·수급 분석가" in s or "macro & flow" in s:
             return json.dumps({"direction": "down", "confidence": "낮음",
                                "summary": "원화 소폭 강세지만 외국인 순매수 규모는 제한적.",
-                               "notable_points": ["원/달러 -0.35%"]}, ensure_ascii=False)
+                               "notable_points": [f"원/달러 -0.35%{self._cite(user, '원/달러')}"]}, ensure_ascii=False)
         if "반도체 분석가" in s or "semiconductor analyst" in s:
             return json.dumps({"direction": "up", "confidence": "높음",
                                "summary": "SOX 강세로 반도체 대형주 우호적.",
-                               "notable_points": ["SOX +1.10%"]}, ensure_ascii=False)
+                               "notable_points": [f"SOX +1.10%{self._cite(user, 'SOX')}"]}, ensure_ascii=False)
         if "뉴스·심리 분석가" in s or "news sentiment" in s:
             return json.dumps({"direction": "up", "confidence": "낮음",
                                "summary": "뉴스 제목은 대체로 중립~긍정.",
-                               "notable_points": ["HBM 수주 기대 기사"]}, ensure_ascii=False)
+                               "notable_points": [f"HBM 수주 기대 기사{self._cite(user, None, 'N')}"]}, ensure_ascii=False)
         if "기술적 분석가" in s or "technical analyst" in s:
             return json.dumps({"direction": "up", "confidence": "보통",
                                "summary": "지수 상승 모멘텀, 과매수 아님.",
-                               "notable_points": ["S&P500 +0.40%"]}, ensure_ascii=False)
+                               "notable_points": [f"S&P500 +0.40%{self._cite(user, 'S&P500')}"]}, ensure_ascii=False)
         if "analyst" in s or "분석가" in s:
             return json.dumps({
                 "us_indices": [

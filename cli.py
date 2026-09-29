@@ -241,6 +241,10 @@ def cmd_package():
 def cmd_export_site():
     from web.export_site import export_site
     r = export_site()
+    from web.publish_site import publish_if_enabled
+    published = publish_if_enabled(r['index'])
+    if published:
+        print(f"[공유 페이지 업로드 완료] {published['url']} (게시 반영에 수 분 걸릴 수 있습니다.)")
     print(f"[완료] 읽기 전용 스냅샷: {r['index']}")
     print("  이 파일은 실행 버튼도 서버 연결도 없어서, 누가 열어도 분석(API 과금)을 실행할 수 없습니다.")
 
@@ -283,7 +287,7 @@ if __name__ == "__main__":
             llm = _real_llm() if Config.api_key() else MockLLMClient()
         except Exception:  # noqa: BLE001
             llm = MockLLMClient()
-        r = TradingAgentsPipeline(llm, memory).review_now()
+        r = TradingAgentsPipeline(llm, memory).review_now(sys.argv[2] if len(sys.argv) > 2 else None)
         if r:
             print(json.dumps({k: r[k] for k in ("lesson", "cause", "misleading_evidence", "ignored_signals", "luck", "confidence_note", "note")},
                              ensure_ascii=False, indent=2))

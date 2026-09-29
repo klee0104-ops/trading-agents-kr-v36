@@ -123,6 +123,17 @@ def build_snapshot_data() -> dict:
         or baseline_predictions(latest.get("us_indices", []))
     sn = o.get("snapshot") or {}
     kh = o.get("kospi_history")
+    # (V3.22) KOSPI 차트·현재 지수는 페이지를 만드는 시점의 최신 시세로 갱신한다(Yahoo 누락분은 네이버로 보충).
+    # 분석 당시 값이 누락된 채 저장돼 있으면(예: 9/28 −2.70% 빠짐) 차트가 옛 날짜에서 끝나 '상승'처럼 보이던 문제.
+    try:
+        from datetime import date as _d
+        from data.market_data import MarketDataProvider
+        from data.sessions import kst_now
+        h = MarketDataProvider().fetch_kospi_history(kst_now().date(), sessions=80)
+        if h.get("dates") and (not kh or h["dates"][-1] >= (kh.get("dates") or [""])[-1]):
+            kh = {"dates": h["dates"], "closes": [round(c, 2) for c in h["closes"]], "refreshed": True}
+    except Exception as e:  # noqa: BLE001 — 네트워크 없으면 저장된 값 사용
+        print(f"[공유 페이지] KOSPI 최신 시세 갱신 실패(저장값 사용): {e}")
     # (V3.19) 저장된 분석에 시세/차트가 없으면(구버전 결과) 공유 페이지 생성 시점에 시세만 보충한다. LLM 미사용.
     if not sn.get("us_indices") or not kh:
         try:
@@ -251,6 +262,8 @@ body{margin:0;background:var(--bg);color:var(--ink);
 header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:12px}
 h1{margin:0;font-size:22px;letter-spacing:-.01em;text-wrap:balance}
 .sub{color:var(--ink-2);font-size:13px}
+.clk{font-size:12px;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.stale{margin:12px 0;padding:10px 14px;border:1px solid var(--warn);border-radius:10px;color:var(--warn);font-size:13px}
 .ro{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2);
   border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:4px 10px}
 .ro b{color:var(--ink)}
@@ -317,6 +330,63 @@ th{font-weight:500;color:var(--muted);font-size:12px} td.num,th.num{text-align:r
 .board .foot{font-size:11.5px;color:var(--muted);margin-top:10px}
 .btn{font:inherit;font-size:13px;cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--ink);padding:6px 10px;border-radius:8px}
 footer{color:var(--muted);font-size:12px;display:grid;gap:4px}
+
+/* ---- V3.23 모바일 공유 최적화 ---- */
+.tabs a i,.tabs a .s{display:none}
+.panel.active{grid-template-columns:minmax(0,1fr)}
+.hero-3,.grid{grid-template-columns:minmax(0,1fr) 320px}
+.grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+svg{max-width:100%;height:auto}
+section,.hero-card,.board{min-width:0}
+section>*,.hero-card>*,#pred>*,#ret>*,#paper>*,.panel>*{min-width:0}
+.tbl{max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+@media (max-width:1000px){.hero-3{grid-template-columns:minmax(0,1fr)}.board{position:static}}
+@media (max-width:820px){.grid{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:640px){
+  body{font-size:15px;padding-bottom:calc(66px + env(safe-area-inset-bottom))}
+  .wrap{padding-inline:12px;padding-block:14px 24px;gap:14px}
+  .panel.active{gap:14px}
+  .topbar{overflow:hidden}.topbar-inner{padding:8px 12px;gap:8px;flex-wrap:nowrap;max-width:100vw}
+  html,body{overflow-x:hidden}
+  .brand{min-width:0;flex:1;overflow:hidden}.brand b{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .brand small{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .brand .logo{width:30px;height:30px;flex:0 0 auto}
+  .ro{display:none}.clk{font-size:10.5px}
+  .btn{padding:6px 9px;font-size:12px;flex:0 0 auto}
+  /* 하단 고정 탭바 (앱처럼) */
+  .tabs{position:fixed;left:0;right:0;bottom:0;z-index:30;display:grid;grid-template-columns:repeat(6,1fr);gap:0;
+    background:var(--panel);border-top:1px solid var(--line);padding:4px 2px calc(4px + env(safe-area-inset-bottom));order:0;width:auto}
+  .tabs a{display:flex;flex-direction:column;align-items:center;gap:1px;padding:6px 0;border-radius:8px;font-size:11px;color:var(--muted)}
+  .tabs a i{display:block;font-style:normal;font-size:17px;line-height:1.1}
+  .tabs a .l{display:none}.tabs a .s{display:block}
+  .tabs a.active{background:transparent;color:var(--accent);font-weight:700}
+  section,.hero-card{padding:16px 14px;border-radius:12px;gap:10px}
+  h2{font-size:16px}.h2-sub{display:block;margin:4px 0 0;font-size:12px}
+  .chart-head{gap:6px 10px}.chart-head .px{font-size:26px}
+  .inds{grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.ind{padding:7px 8px}.ind .v{font-size:13px}
+  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:10px}
+  .kpi{padding:12px}.kpi .v{font-size:19px!important;word-break:keep-all;letter-spacing:-.02em}.kpi .l{font-size:10.5px}
+  .why-dir{font-size:26px}
+  .hero-card .chip,.chip{font-size:12.5px;padding:4px 10px;white-space:nowrap}
+  .evidence li{grid-template-columns:22px 1fr;padding:10px;font-size:14px}
+  .votes{gap:5px}.vote{font-size:12px;padding:3px 9px}
+  .stocks{grid-template-columns:minmax(0,1fr);gap:10px}
+  .stock .n{font-size:15px}
+  .turn{grid-template-columns:44px 1fr;font-size:14px}
+  table{font-size:13px} th,td{padding:8px 6px}
+  .tbl{overflow:visible;margin:0}
+  .tbl table,.tbl tbody,.tbl tr,.tbl td{display:block;width:100%}
+  .tbl thead{display:none}
+  .tbl tr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 14px;border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:8px;background:var(--panel-2)}
+  .tbl td{border:0;padding:3px 0;white-space:normal!important;text-align:left!important;display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:13.5px;min-width:0}
+  .tbl td[data-label]::before{content:attr(data-label);color:var(--muted);font-size:11.5px;font-weight:400;font-family:"IBM Plex Sans KR",system-ui,sans-serif;white-space:nowrap}
+  .tbl td:first-child{grid-column:1/-1;font-weight:700;font-size:14.5px;border-bottom:1px solid var(--line);padding-bottom:7px;margin-bottom:3px}
+  .tbl td:first-child::before{content:none!important}
+  .tbl td[colspan]{grid-column:1/-1;border:0;background:none}
+  .board .kq .px{font-size:28px}.board td{font-size:14px}
+  footer{font-size:11.5px;padding-bottom:8px}
+  .label{margin-top:4px}
+}
 """
 
 _JS = r"""
@@ -331,6 +401,19 @@ _JS = r"""
 
   $('asof').textContent = D.analysis_at ? D.analysis_at.replace('T',' ') : '없음';
   $('gen').textContent = D.generated_at.replace('T',' ');
+  // (V3.26) 보는 사람 기준 현재 시각(KST)과 스냅샷이 얼마나 지났는지. 오래되면 경고.
+  (function(){
+    var F=null; try{F=new Intl.DateTimeFormat('ko-KR',{timeZone:'Asia/Seoul',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});}catch(e){}
+    var gen=Date.parse(String(D.generated_at).replace(' ','T')+(/[+-]\d\d:?\d\d$|Z$/.test(D.generated_at)?'':'+09:00'));
+    function ago(ms){var s=Math.max(0,Math.round(ms/1000));return s<60?s+'초 전':s<3600?Math.floor(s/60)+'분 전':s<86400?Math.floor(s/3600)+'시간 '+Math.floor(s%3600/60)+'분 전':Math.floor(s/86400)+'일 전';}
+    function tick(){
+      if(F){var o={};F.formatToParts(new Date()).forEach(function(p){o[p.type]=p.value;});
+        $('clock').textContent=o.month+'.'+o.day+'('+o.weekday+') '+String(Number(o.hour)%24).padStart(2,'0')+':'+o.minute+':'+o.second+' KST';}
+      if(isFinite(gen)){var d=Date.now()-gen;$('genAgo').textContent=ago(d);
+        var st=$('stale'); if(d>30*3600*1000){st.hidden=false;st.textContent='이 페이지는 '+ago(d)+'에 만든 스냅샷입니다. 최신 예측이 아닐 수 있어요.';}}
+    }
+    tick(); if(typeof setInterval==='function') setInterval(tick,1000);
+  })();
   $('tgt').textContent = D.target_date || '-';
 
   var k=[];
@@ -383,7 +466,7 @@ _JS = r"""
 
   var KH=D.kospi_history;
   if(KH&&KH.closes&&KH.closes.length>5){
-    var cl=KH.closes,dt=KH.dates,n=cl.length,W=720,H=260,pl=8,pr=62,pt=12,pb=26;
+    var cl=KH.closes,dt=KH.dates,n=cl.length,W=Math.round(Math.min(720,Math.max(300,((typeof window!=='undefined'&&window.innerWidth)||1100)-(((typeof window!=='undefined'&&window.innerWidth)||1100)<700?64:96)))),H=W<500?210:260,pl=8,pr=W<500?50:62,pt=12,pb=26;
     function sma(a,k){return a.map(function(_,i){return i+1<k?null:a.slice(i+1-k,i+1).reduce(function(x,y){return x+y;},0)/k;});}
     var m20=sma(cl,20),m60=sma(cl,60),lo=Math.min.apply(null,cl)*0.995,hi=Math.max.apply(null,cl)*1.005;
     function X(i){return pl+(i/(n-1))*(W-pl-pr);} function Y(v){return pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);}
@@ -392,7 +475,7 @@ _JS = r"""
     var xl=[0,Math.floor(n/2),n-1].map(function(i){return '<text class="ax" x="'+X(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="'+(i===0?'start':i===n-1?'end':'middle')+'">'+esc((dt[i]||'').slice(5))+'</text>';}).join('');
     var last=cl[n-1],prev=cl[n-2]||last,chg=(last/prev-1)*100,pr2='';
     if(p.direction){var up=p.direction==='up',x=X(n-1)+22,y=Y(last)+(up?-22:22),c=up?'var(--up)':'var(--down)';
-      pr2='<line x1="'+X(n-1).toFixed(1)+'" y1="'+Y(last).toFixed(1)+'" x2="'+x+'" y2="'+y+'" stroke="'+c+'" stroke-width="2" stroke-dasharray="3 3"/><circle cx="'+x+'" cy="'+y+'" r="5" fill="'+c+'"/><text class="ax" x="'+(x+8)+'" y="'+(y+4)+'" style="fill:'+c+'">'+(up?'▲':'▼')+(prob!=null?' '+prob+'%':'')+'</text>';}
+      pr2='<line x1="'+X(n-1).toFixed(1)+'" y1="'+Y(last).toFixed(1)+'" x2="'+x+'" y2="'+y+'" stroke="'+c+'" stroke-width="2" stroke-dasharray="3 3"/><circle cx="'+x+'" cy="'+y+'" r="5" fill="'+c+'"/><text class="ax" x="'+(x-2)+'" y="'+(up?y-10:y+18)+'" text-anchor="end" style="fill:'+c+';font-weight:600">'+(up?'▲':'▼')+(prob!=null?' '+prob+'%':'')+'</text>';}
     $('kChart').innerHTML='<svg class="kchart" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="KOSPI 최근 '+n+'거래일"><defs><linearGradient id="kg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--accent)" stop-opacity="0.22"/><stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>'+g+
       '<path fill="url(#kg)" d="'+path(cl)+' L'+X(n-1).toFixed(1)+','+(H-pb)+' L'+X(0).toFixed(1)+','+(H-pb)+' Z"/><path class="ma60" d="'+path(m60)+'"/><path class="ma20" d="'+path(m20)+'"/><path class="price" d="'+path(cl)+'"/>'+pr2+xl+'</svg>';
     $('kPx').textContent=last.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -465,26 +548,30 @@ _JS = r"""
     '</tbody></table></div><div class="ev">AI가 단순 규칙보다 꾸준히 높아야 의미가 있습니다. 같은 날짜 표본으로 비교합니다.</div>';
 
   var rb=D.returns||null;
-  function curve(series,w,h){w=w||520;h=h||110;var all=[];series.forEach(function(x){all=all.concat(x.v);});if(!all.length)return '';
+  function curve(series,w,h){w=w||Math.round(Math.min(720,Math.max(300,((typeof window!=='undefined'&&window.innerWidth)||1100)-(((typeof window!=='undefined'&&window.innerWidth)||1100)<700?64:96))));h=h||(w<500?150:140);var all=[];series.forEach(function(x){all=all.concat(x.v);});if(!all.length)return '';
     var lo=Math.min.apply(null,[0].concat(all)),hi=Math.max.apply(null,[0].concat(all)),pad=6,span=(hi-lo)||1,n=Math.max.apply(null,series.map(function(x){return x.v.length;}));
-    function X(i){return pad+(n>1?i/(n-1):0)*(w-2*pad);}function Y(v){return h-pad-((v-lo)/span)*(h-2*pad);}
+    function X(i){return pad+(n>1?i/(n-1):0)*(w-2*pad);}var top=12+series.length*16;function Y(v){return h-pad-((v-lo)/span)*(h-pad-top);}
     return '<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="'+h+'"><line x1="0" y1="'+Y(0)+'" x2="'+w+'" y2="'+Y(0)+'" stroke="var(--line)"/>'+
       series.map(function(x){return '<polyline fill="none" stroke="'+x.c+'" stroke-width="2" points="'+x.v.map(function(v,i){return X(i).toFixed(1)+','+Y(v).toFixed(1);}).join(' ')+'"/>';}).join('')+
       series.map(function(x,k){return '<text x="'+pad+'" y="'+(14+k*14)+'" font-size="11" fill="'+x.c+'">'+esc(x.n)+' '+x.v[x.v.length-1].toFixed(2)+'%</text>';}).join('')+'</svg>';}
   function prow(l,q,b){function f(v){return typeof v==='number'?v.toFixed(2):'—';}
-    return '<tr'+(b?' style="font-weight:600"':'')+'><td>'+esc(l)+'</td><td class="num '+(q.total_return_pct>=0?'up':'down')+'">'+f(q.total_return_pct)+'%</td><td class="num">'+(q.sharpe_annual==null?'—':f(q.sharpe_annual))+'</td><td class="num">'+f(q.max_drawdown_pct)+'%</td><td class="num">'+(q.win_rate==null?'—':Math.round(q.win_rate*100)+'%')+'</td><td class="num">'+(q.traded_days==null?'—':q.traded_days)+'/'+q.days+'</td></tr>';}
+    return '<tr'+(b?' style="font-weight:600"':'')+'><td>'+esc(l)+'</td><td class="num '+(q.total_return_pct>=0?'up':'down')+'">'+f(q.total_return_pct)+'%</td><td class="num">'+(q.sharpe_annual==null||(q.days||0)<20?'<span class="ev">표본 부족</span>':f(q.sharpe_annual))+'</td><td class="num">'+f(q.max_drawdown_pct)+'%</td><td class="num">'+(q.win_rate==null?'—':Math.round(q.win_rate*100)+'%')+'</td><td class="num">'+(q.traded_days==null?'—':q.traded_days)+'/'+q.days+'</td></tr>';}
   $('ret').innerHTML = rb ? curve([{n:'AI 포지션',v:rb.ai.equity_curve_pct||[],c:'var(--accent)'},{n:'바이앤홀드',v:rb.buy_hold.equity_curve_pct||[],c:'var(--muted)'}])+
     '<div class="tbl"><table><thead><tr><th>방식</th><th class="num">누적</th><th class="num">샤프</th><th class="num">MDD</th><th class="num">승률</th><th class="num">거래일</th></tr></thead><tbody>'+
     prow('AI 포지션',rb.ai,true)+prow('KOSPI 바이앤홀드',rb.buy_hold,false)+Object.keys(rb.baselines||{}).map(function(k){return prow(rb.baselines[k].label+' (100%)',rb.baselines[k],false);}).join('')+
     Object.keys(rb.by_agent||{}).map(function(k){return prow((AL[k]||k)+' (방향 100%)',rb.by_agent[k],false);}).join('')+'</tbody></table></div>'+
-    '<div class="ev">'+(rb.ai_beats_buy_hold&&rb.ai_beats_best_baseline?'AI 포지션이 바이앤홀드·최고 단순규칙보다 수익이 높습니다.':'아직 바이앤홀드 또는 단순규칙이 AI보다 수익이 높습니다.')+
+    '<div class="ev">'+(function(){var best=rb.baselines&&rb.best_baseline?rb.baselines[rb.best_baseline]:null,bt=best?best.total_return_pct:null,a=rb.ai.total_return_pct,bh=rb.buy_hold.total_return_pct;
+      if(a>bh&&(bt==null||a>bt))return 'AI 포지션이 바이앤홀드·최고 단순규칙보다 수익이 높습니다.';
+      if(a>bh&&bt!=null&&Math.abs(a-bt)<0.005)return 'AI 포지션이 바이앤홀드보다 높고, 최고 단순규칙('+esc(best.label)+')과 같습니다.';
+      if(a>bh)return 'AI 포지션이 바이앤홀드보다는 높지만 단순규칙('+esc(best.label)+')보다 낮습니다.';
+      return '아직 바이앤홀드가 AI 포지션보다 수익이 높습니다.';})()+
     ' 포지션 = (2p−1)×½켈리×목표변동성15%/실현변동성, |2p−1|<0.1이면 현금. 왕복 비용 0.1% 차감. 표본 '+rb.days+'일.</div>'
     : '<div class="empty">검증된 기록이 쌓이면 수익률(롱=KODEX200 · 쇼트=KODEX인버스 · 현금)이 표시됩니다.</div>';
 
   var PA=D.paper||null;
   function won(v){return Number(v).toLocaleString(undefined,{maximumFractionDigits:0})+'원';}
   $('paper').innerHTML = PA ? (PA.days===0?'<div class="ev">운용 시작 전 · 수익률 0%는 초기 상태입니다. 아직 모의 체결·평가 기록이 없습니다.</div>':'')+'<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">'+
-    [['평가금액',won(PA.equity),pct(PA.total_return_pct)+' ('+(PA.pnl>=0?'+':'')+won(PA.pnl)+')',PA.total_return_pct>=0?'up':'down'],['시작 자금',won(PA.initial_cash),PA.days+'일 운용',''],['샤프 / MDD',(PA.sharpe_annual==null?'—':PA.sharpe_annual)+' / '+(PA.max_drawdown_pct==null?'—':PA.max_drawdown_pct+'%'),'승률 '+(PA.win_rate==null?'—':Math.round(PA.win_rate*100)+'%'),''],['거래',PA.trades+'건','비용 '+won(PA.fees),'']]
+    [['평가금액',won(PA.equity),pct(PA.total_return_pct)+' ('+(PA.pnl>=0?'+':'')+won(PA.pnl)+')',PA.total_return_pct>0?'up':PA.total_return_pct<0?'down':''],['시작 자금',won(PA.initial_cash),PA.days+'일 운용',''],['샤프 / MDD',(PA.sharpe_annual==null?'—':PA.sharpe_annual)+' / '+(PA.max_drawdown_pct==null?'—':PA.max_drawdown_pct+'%'),'승률 '+(PA.win_rate==null?'—':Math.round(PA.win_rate*100)+'%'),''],['거래',PA.trades+'건','비용 '+won(PA.fees),'']]
     .map(function(t){return '<div class="kpi"><div class="l">'+t[0]+'</div><div class="v mono '+t[3]+'" style="font-size:22px">'+t[1]+'</div><div class="d">'+t[2]+'</div></div>';}).join('')+'</div>'+
     curve([{n:'가상 계좌',v:(PA.equity_curve||[]).map(function(x){return (x.equity/PA.initial_cash-1)*100;}),c:'var(--accent)'}])+
     '<div class="tbl"><table><thead><tr><th>거래일</th><th class="num">목표</th><th class="num">평가금액</th><th class="num">일수익</th><th class="num">누적</th></tr></thead><tbody>'+
@@ -492,7 +579,7 @@ _JS = r"""
     '<div class="ev">현금 '+won(PA.cash||0)+' · 보유 '+(Object.keys(PA.holdings||{}).length?Object.keys(PA.holdings).map(function(t){return (t.indexOf('069500')===0?'KODEX 200':'KODEX 인버스')+' '+PA.holdings[t]+'주';}).join(', '):'없음')+'</div>'+
     ((PA.recent_trades||[]).length?'<div class="label">최근 체결</div><div class="tbl"><table><thead><tr><th>일자</th><th>종목</th><th class="num">매매</th><th class="num">수량</th><th class="num">체결가</th><th class="num">수수료</th></tr></thead><tbody>'+
       PA.recent_trades.map(function(t){return '<tr><td>'+esc(t.date)+'</td><td>'+(t.ticker.indexOf('069500')===0?'KODEX 200':'KODEX 인버스')+'</td><td class="num '+(t.side==='buy'?'up':'down')+'">'+(t.side==='buy'?'매수':'매도')+'</td><td class="num">'+t.qty+'</td><td class="num">'+Number(t.price).toLocaleString()+'</td><td class="num">'+won(t.fee)+'</td></tr>';}).join('')+'</tbody></table></div>':'')+
-    '<div class="ev">가상 체결입니다. 아침 분석의 포지션 비중을 그날 ETF 시가에 맞추고 종가로 평가하며, 다음 날 다시 조정합니다. 실제 돈은 들어가지 않습니다.</div>'
+    '<div class="ev">가상 체결입니다. 아침 분석의 포지션 비중대로 ETF를 사고팔아(분석이 08:40 전에 끝나면 장전 시간외 전일 종가, 아니면 시가 체결) 종가로 평가하며, 다음 날 다시 조정합니다. 실제 돈은 들어가지 않습니다.</div>'
     : '<div class="empty">아직 체결 기록이 없습니다. 마감 채점(15:45)부터 그날 포지션대로 ETF를 가상 체결하고 여기에 평가금액·손익·체결 내역이 쌓입니다. 시작 자금 1,000만 원.</div>';
 
   var ag=st.by_agent||{}, order=['TechnicalAnalyst','MacroFlowAnalyst','SemiconductorAnalyst','NewsSentimentAnalyst','MarketAnalyst','Bull','Bear','RiskManager','Trader'];
@@ -519,18 +606,20 @@ _BODY = """<title>KOSPI 멀티에이전트 리포트</title>
   <div class="topbar-inner">
     <div class="brand"><span class="logo">TA</span><span><b>KOSPI 멀티에이전트 리포트</b><small>대상 거래일 <span class="mono" id="tgt"></span> · 분석 <span class="mono" id="asof"></span></small></span></div>
     <nav class="tabs" id="tabs">
-      <a href="#today" data-tab="today" class="active">오늘의 예측</a>
-      <a href="#stocks" data-tab="stocks">관심 종목</a>
-      <a href="#process" data-tab="process">분석 과정</a>
-      <a href="#performance" data-tab="performance">성과·수익률</a>
-      <a href="#paper" data-tab="paper">모의투자 수익률</a>
-      <a href="#records" data-tab="records">예측 기록</a>
+      <a href="#today" data-tab="today" class="active"><i>◎</i><span class="l">오늘의 예측</span><span class="s">예측</span></a>
+      <a href="#stocks" data-tab="stocks"><i>▦</i><span class="l">관심 종목</span><span class="s">종목</span></a>
+      <a href="#process" data-tab="process"><i>⋯</i><span class="l">분석 과정</span><span class="s">과정</span></a>
+      <a href="#performance" data-tab="performance"><i>↗</i><span class="l">성과·수익률</span><span class="s">성과</span></a>
+      <a href="#paper" data-tab="paper"><i>₩</i><span class="l">모의투자 수익률</span><span class="s">모의투자</span></a>
+      <a href="#records" data-tab="records"><i>≡</i><span class="l">예측 기록</span><span class="s">기록</span></a>
     </nav>
+    <span class="mono clk" id="clock">--:--:-- KST</span>
     <span class="ro"><b>읽기 전용 · 모의투자</b> 실제 자금 거래 없음</span>
     <button class="btn" id="btnTheme">☀ 밝게</button>
   </div>
 </header>
 <div class="wrap">
+  <div class="stale" id="stale" hidden></div>
   <div class="panel active" id="tab-today">
     <div class="hero hero-3">
       <div style="display:grid;gap:20px;min-width:0">
@@ -570,7 +659,7 @@ _BODY = """<title>KOSPI 멀티에이전트 리포트</title>
     </div>
   </div>
   <div class="panel" id="tab-paper">
-    <section><h2>모의투자 수익률 <span class="h2-sub">가상계좌 · 실제 자금 거래 없음 · 매일 시가 리밸런싱 → 종가 평가 · 수수료 0.015% + 슬리피지 0.05%</span></h2><div id="paper" style="display:grid;gap:14px"></div></section>
+    <section><h2>모의투자 수익률 <span class="h2-sub">가상계좌 · 실제 자금 거래 없음 · 매일 리밸런싱(08:40 전 분석이면 전일 종가, 이후면 시가 체결) → 종가 평가 · 수수료 0.015% + 슬리피지 0.05%</span></h2><div id="paper" style="display:grid;gap:14px"></div></section>
   </div>
   <div class="panel" id="tab-records">
     <section><h2>예측 기록</h2><div id="records"></div></section>
@@ -578,7 +667,7 @@ _BODY = """<title>KOSPI 멀티에이전트 리포트</title>
   <footer>
     <div>투자 자문이 아닙니다. 모든 내용은 참고용 정보이며, 방향성 신호는 매수·매도 추천이 아닙니다.</div>
     <div>뉴스 원문은 이 공유본에 포함되지 않습니다(건수·AI 요약만). 시장 데이터 출처: Yahoo Finance, Google 뉴스 RSS, 네이버 증권(집계 수치만).</div>
-    <div>스냅샷 생성 <span class="mono" id="gen"></span> · TradingAgents-KR</div>
+    <div>스냅샷 생성 <span class="mono" id="gen"></span> (<span id="genAgo"></span>) · TradingAgents-KR</div>
   </footer>
 </div>
 <script type="application/json" id="ta-data">{data}</script>
@@ -590,6 +679,9 @@ _BODY = """<title>KOSPI 멀티에이전트 리포트</title>
     tabs.forEach(function(a){a.classList.toggle('active',a.dataset.tab===n);});
     document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('active',p.id==='tab-'+n);});}
   go((location.hash||'').replace('#',''));
+  var tbs=document.querySelectorAll('.tbl table');
+  for(var ti=0;ti<tbs.length;ti++){var hs=[],ths=tbs[ti].querySelectorAll('thead th');for(var hi=0;hi<ths.length;hi++)hs.push(ths[hi].textContent.trim());
+    var trs=tbs[ti].querySelectorAll('tbody tr');for(var ri=0;ri<trs.length;ri++){var tds=trs[ri].children;for(var ci=0;ci<tds.length;ci++){if(hs[ci]&&!tds[ci].hasAttribute('colspan'))tds[ci].setAttribute('data-label',hs[ci]);}}}
   var tb=document.getElementById('btnTheme');
   function paint(){tb.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☾ 어둡게':'☀ 밝게';}
   try{var t=localStorage.getItem('ta.theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}

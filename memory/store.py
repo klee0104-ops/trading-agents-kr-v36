@@ -150,6 +150,38 @@ class MemoryStore:
             if not r["verified"] and (r["target_date"] < str(today) or (include_today and r["target_date"] == str(today)))
         ]
 
+    def superseded_records(self) -> list[dict]:
+        """(V3.22) 같은 대상일의 더 새로운 예측으로 대체된 옛 기록 (통계·채점 제외, 복기용 보관)."""
+        if self.path is None:
+            return []
+        p = os.path.splitext(self.path)[0] + "_superseded.json"
+        if not os.path.exists(p):
+            return []
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def recompute_legacy_returns(self) -> int:
+        """(V3.22) 포지션 없이 채점돼 수익률 0.0 으로 저장된 옛 기록을 방향 100% 규칙으로 다시 계산. 바뀐 건수 반환."""
+        from execution.position import direction_position, strategy_return_pct
+        data = self._read(); n = 0
+        for k, r in data.items():
+            if r.get("verified") and r.get("position") is None and r.get("actual_change_pct") is not None:
+                etf = r.get("etf_returns") or {}
+                sr = strategy_return_pct(direction_position(r.get("direction"), r.get("realized_vol")), r["actual_change_pct"],
+                                         long_etf_ret_pct=etf.get("long"), short_etf_ret_pct=etf.get("short"))
+                if sr and sr["return_pct"] != r.get("strategy_return_pct"):
+                    r["strategy_return_pct"], r["strategy_leg"], r["return_proxy"] = sr["return_pct"], sr["leg"], sr["proxy"]
+                    r["position_legacy"] = True; n += 1
+            # 에이전트별 수익률이 없는 옛 기록도 같은 규칙으로 채운다 (방향 100% × 변동성 스케일, 지수 근사)
+            if r.get("verified") and r.get("actual_change_pct") is not None:
+                for a in r.get("agent_predictions", []):
+                    if a.get("direction") in ("up", "down") and a.get("strategy_return_pct") is None:
+                        sa = strategy_return_pct(direction_position(a["direction"], r.get("realized_vol")), r["actual_change_pct"])
+                        a["strategy_return_pct"] = sa["return_pct"] if sa else None; n += 1
+        if n:
+            self._write(data)
+        return n
+
     def attach_postmortem(self, target_date: str, pm: dict) -> None:
         data = self._read()
         if target_date in data:
@@ -182,7 +214,12 @@ class MemoryStore:
         if actual_change_pct is not None:
             from execution.position import strategy_return_pct
             etf = etf_returns or {}
-            sr = strategy_return_pct(rec.get("position") or 0.0, actual_change_pct,
+            from execution.position import direction_position
+            pos = rec.get("position")
+            if pos is None:  # (V3.22) 포지션 도입 전 기록: 0(현금)이 아니라 방향 100%로 소급 (통계와 같은 규칙)
+                pos = direction_position(rec.get("direction"), rec.get("realized_vol"))
+                rec["position_legacy"] = True
+            sr = strategy_return_pct(pos, actual_change_pct,
                                      long_etf_ret_pct=etf.get("long"), short_etf_ret_pct=etf.get("short"))
             if sr:
                 rec["strategy_return_pct"] = sr["return_pct"]

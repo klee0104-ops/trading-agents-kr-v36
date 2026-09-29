@@ -14,13 +14,13 @@ call venv\Scripts\activate.bat
 rem 마감 채점(15:45) 작업이 아직 없으면 자동 등록 (한 번만)
 schtasks /query /tn "TradingAgents-KR 마감채점" >nul 2>&1
 if errorlevel 1 (
-  echo [등록] 마감 채점 작업(월~금 15:45)을 등록합니다. >> "%LOG%"
+  echo [등록] 마감 채점 작업 월~금 15:45 을 등록합니다. >> "%LOG%"
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\register_task.ps1" -BatPath "%~dp0복기_자동.bat" -Time "15:45" -TaskName "TradingAgents-KR 마감채점" >> "%LOG%" 2>&1
 )
 
 rem 장 시작(09:00) 이후 ~ 장 마감 전이면 아침 분석 의미가 없으므로 건너뜀 (수동 실행은 실제분석_로그실행.bat)
 if %HOUR% GEQ 9 if %HOUR% LSS 16 (
-  echo [건너뜀] 이미 장중(%HOUR%시)이라 아침 분석을 실행하지 않습니다. >> "%LOG%"
+  echo [건너뜀] 이미 장중 %HOUR%시 이라 아침 분석을 실행하지 않습니다. >> "%LOG%"
   exit /b 0
 )
 
@@ -44,6 +44,7 @@ goto retry
 rem 3) 읽기 전용 결과 페이지 갱신 + 알림 + 브라우저 열기
 echo --- 3/3 결과 페이지 생성/알림 --- >> "%LOG%"
 python cli.py export-site >> "%LOG%" 2>&1
+if errorlevel 1 exit /b 1
 if not exist site\archive mkdir site\archive
 copy /y site\index.html "site\archive\index_%TODAY%_아침.html" >nul
 python tools\notify.py >> "%LOG%" 2>&1

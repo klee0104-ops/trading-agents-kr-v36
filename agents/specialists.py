@@ -19,8 +19,13 @@ from typing import Optional
 from agents.base import LLMClient
 from data.market_data import MarketSnapshot
 from rules.engine import MarketAnalysis, build_context_text
+from rules.citations import CITATION_RULES, registry_text, enforce_report
 
-_SCHEMA = '반드시 JSON만 출력하세요: {"direction": "up 또는 down", "confidence": "낮음/보통/높음", "summary": "...", "notable_points": ["...", "..."]}'
+_SCHEMA = (CITATION_RULES + "\n"
+           '반드시 JSON만 출력하세요: {"direction": "up 또는 down", "confidence": "낮음/보통/높음", '
+           '"summary": "... [ID]", "notable_points": ["사실·수치 ... [M1]", "... [Q2][R1]"]}\n'
+           "notable_points 의 각 항목은 근거 ID가 붙은 한 문장입니다. ID가 없거나 수치가 자료와 다르면 코드가 폐기하고, "
+           "남은 근거가 없으면 당신의 의견은 다수결에서 제외됩니다.")
 
 TECHNICAL_PROMPT = f"""당신은 기술적 분석가(Technical Analyst) 에이전트입니다.
 미국 주요 지수의 등락률과 이미 코드로 계산된 RSI14/MACD 히스토그램/볼린저 %B만 근거로,
@@ -38,11 +43,11 @@ SOX의 등락·기술적 지표와 반도체 관련 사실만 근거로 판단�
 SOX가 ±1.5% 이상이면 그 방향에 무게를, ±0.5% 이내면 confidence를 낮게. {_SCHEMA}"""
 
 NEWS_PROMPT = f"""당신은 뉴스·심리 분석가(News Sentiment Analyst) 에이전트입니다.
-주어진 최근 뉴스 제목만 근거로 국내 증시(KOSPI) 시장 심리를 판단하세요. 제목은 [날짜][종목명] 형식으로
+주어진 최근 뉴스 제목만 근거로 국내 증시(KOSPI) 시장 심리를 판단하세요. 제목은 [N번] [날짜][종목명][매체] 형식으로
 핵심 종목(삼성전자·SK하이닉스)과 시가총액 상위 종목들의 것이 섞여 있습니다. 핵심 종목과 시장 전체에
 영향이 큰 뉴스(실적, 수급, 정책, 대형 계약, 사고)에 무게를 두고, 개별 소형 이슈는 낮게 보세요.
 제목에 없는 사실을 추측하지 말고, 긍정/부정 제목의 비율과 무게를 근거로 하세요.
-뉴스가 중립적이거나 엇갈리면 confidence를 낮게. notable_points에는 종목명을 함께 적으세요. {_SCHEMA}"""
+뉴스가 중립적이거나 엇갈리면 confidence를 낮게. notable_points에는 종목명과 매체명, 뉴스 ID [N번]을 반드시 함께 적으세요. {_SCHEMA}"""
 
 
 def _idx_lines(quotes, names: Optional[set] = None) -> str:
@@ -63,30 +68,44 @@ def _idx_lines(quotes, names: Optional[set] = None) -> str:
     return "\n".join(out) or "- (데이터 없음)"
 
 
-def run_technical(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis) -> dict:
+def _reg_block(reg, groups) -> str:
+    txt = registry_text(reg, groups) if reg else ""
+    return f"\n\n{txt}\n" if txt else ""
+
+
+def run_technical(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis, reg: Optional[list] = None) -> dict:
     prompt = (f"기준 시점: {snapshot.as_of}\n\n미국 지수 및 기술적 지표(코드로 계산됨):\n{_idx_lines(snapshot.us_indices)}\n"
-              f"\n장세: 추세={ma.regime_trend}, 변동성={ma.regime_volatility}\n\n기술적 관점에서 판단하세요.")
+              f"\n장세: 추세={ma.regime_trend}, 변동성={ma.regime_volatility}"
+              f"{_reg_block(reg, {'us', 'quant'})}\n기술적 관점에서 판단하세요.")
     return llm.complete_json(TECHNICAL_PROMPT, prompt, max_tokens=500)
 
 
-def run_macro_flow(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis) -> dict:
+def run_macro_flow(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis, reg: Optional[list] = None) -> dict:
     from data.kr_flow import describe
     lines = _idx_lines(snapshot.macro)
     flow = describe(snapshot.kr_flow)
     notes = "; ".join(n for n in ma.notes if any(k in n for k in ("원/달러", "금리", "WTI", "달러", "외국인"))) or "없음"
-    prompt = (f"기준 시점: {snapshot.as_of}\n\n거시 지표:\n{lines}\n- {flow}\n\n규칙엔진 거시 관련 메모: {notes}\n\n"
-              f"외국인 자금 환경 관점에서 판단하세요.")
+    prompt = (f"기준 시점: {snapshot.as_of}\n\n거시 지표:\n{lines}\n- {flow}\n\n규칙엔진 거시 관련 메모: {notes}"
+              f"{_reg_block(reg, {'macro', 'flow'})}\n외국인 자금 환경 관점에서 판단하세요.")
     return llm.complete_json(MACRO_PROMPT, prompt, max_tokens=500)
 
 
-def run_semiconductor(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis) -> dict:
+def run_semiconductor(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis, reg: Optional[list] = None) -> dict:
     hint = f"규칙엔진 방향 힌트: {ma.direction_hint or '중립'} ({ma.direction_hint_reason or '-'})"
     prompt = (f"기준 시점: {snapshot.as_of}\n\nSOX(필라델피아 반도체):\n{_idx_lines(snapshot.us_indices, {'SOX'})}\n"
-              f"참고(나스닥): {_idx_lines(snapshot.us_indices, {'나스닥'})}\n{hint}\n\n반도체 관점에서 판단하세요.")
+              f"참고(나스닥): {_idx_lines(snapshot.us_indices, {'나스닥'})}\n{hint}"
+              f"{_reg_block([e for e in reg if e['group'] != 'us' or e['name'] in ('SOX', '나스닥')] if reg else None, {'us'})}"
+              f"\n반도체 관점에서 판단하세요.")
     return llm.complete_json(SEMI_PROMPT, prompt, max_tokens=500)
 
 
 LAST_NEWS_SOURCE = {"source": None}  # 파이프라인이 outcome 에 기록하기 위해 마지막 사용 출처를 남긴다
+
+
+def _press(item) -> str:
+    """(V3.24) 매체명 — 제목 형식 '[날짜][종목명][매체] 제목' 의 세 번째 칸. 대괄호는 제거."""
+    s = str(getattr(item, "source", "") or "").replace("[", "").replace("]", "").strip()
+    return s[:30] or "매체 미상"
 
 
 def _dedupe_titles(titles: list[str], limit: int) -> list[str]:
@@ -151,19 +170,23 @@ def fetch_recent_news_titles(as_of: date, days: int = 2, universe: Optional[list
         limit = per_core if st.get("core") else per_extra
         try:
             items = fetch_news_for_range(st["code"], as_of - timedelta(days=days), as_of, max_pages=pages)
-            titles += [f"[{it.date}][{st['name']}] {it.title}" for it in items[:limit]]
+            titles += [f"[{it.date}][{st['name']}][{_press(it)}] {it.title}" for it in items[:limit]]
         except Exception:  # noqa: BLE001
             continue
     LAST_NEWS_SOURCE["source"] = "naver_stock_mobile"
     return _dedupe_titles(titles, Config.NEWS_MAX_TITLES)
 
 
-def run_news_sentiment(llm: LLMClient, snapshot: MarketSnapshot, titles: list[str]) -> dict:
+def run_news_sentiment(llm: LLMClient, snapshot: MarketSnapshot, titles: list[str], reg: Optional[list] = None) -> dict:
     if not titles:
         return {"direction": None, "confidence": "낮음", "summary": "최근 뉴스 없음 — 판단 보류 (LLM 호출 생략)",
                 "notable_points": [], "skipped": True}
-    prompt = (f"기준 시점: {snapshot.as_of}\n\n최근 뉴스 제목 {len(titles)}건:\n" + "\n".join(f"- {t}" for t in titles)
-              + "\n\n시장 심리 관점에서 판단하세요.")
+    news_reg = [e for e in (reg or []) if e["kind"] == "N"]
+    if news_reg:  # 뉴스마다 ID·매체·수집 경로를 붙여 준다
+        body = registry_text(news_reg, {"news"}, title="최근 뉴스 목록")
+    else:
+        body = f"최근 뉴스 제목 {len(titles)}건:\n" + "\n".join(f"- {t}" for t in titles)
+    prompt = f"기준 시점: {snapshot.as_of}\n\n{body}\n\n시장 심리 관점에서 판단하세요."
     return llm.complete_json(NEWS_PROMPT, prompt, max_tokens=500)
 
 
@@ -176,20 +199,26 @@ SPECIALISTS = [
 
 
 def run_all_specialists(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis,
-                        news_titles: Optional[list[str]] = None) -> dict:
-    """4명 실행 → {"reports": {name: report}, "combined": 통합 리포트}."""
+                        news_titles: Optional[list[str]] = None, registry: Optional[list] = None) -> dict:
+    """4명 실행 → {"reports": {name: report}, "combined": 통합 리포트}.
+    (V3.24) registry(근거 자료 목록)가 있으면 각 분석가에 ID 붙은 자료를 주고, 결과에 출처 규칙을 강제한다."""
     reports = {
-        "TechnicalAnalyst": run_technical(llm, snapshot, ma),
-        "MacroFlowAnalyst": run_macro_flow(llm, snapshot, ma),
-        "SemiconductorAnalyst": run_semiconductor(llm, snapshot, ma),
-        "NewsSentimentAnalyst": run_news_sentiment(llm, snapshot, news_titles or []),
+        "TechnicalAnalyst": run_technical(llm, snapshot, ma, registry),
+        "MacroFlowAnalyst": run_macro_flow(llm, snapshot, ma, registry),
+        "SemiconductorAnalyst": run_semiconductor(llm, snapshot, ma, registry),
+        "NewsSentimentAnalyst": run_news_sentiment(llm, snapshot, news_titles or [], registry),
     }
+    if registry:
+        for name, rep_ in reports.items():
+            enforce_report(name, rep_, registry)
     return {"reports": reports, "combined": combine_reports(reports)}
 
 
 def combine_reports(reports: dict) -> dict:
     """코드 다수결로 통합 리포트를 만든다 (토론·QA 소스 자료). 동률이면 반도체 분석가 우선."""
-    dirs = {n: r.get("direction") for n, r in reports.items() if r.get("direction") in ("up", "down")}
+    # (V3.24) 출처가 확인된 근거가 하나도 없는 분석가(citation_ok=False)는 다수결에서 뺀다
+    dirs = {n: r.get("direction") for n, r in reports.items()
+            if r.get("direction") in ("up", "down") and r.get("citation_ok", True)}
     ups = sum(1 for d in dirs.values() if d == "up")
     downs = len(dirs) - ups
     if not dirs:

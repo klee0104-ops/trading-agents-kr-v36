@@ -31,7 +31,7 @@ def build_summary() -> tuple[str, str]:
     kp = fr.get("kospi_prediction", {})
     direction = _DIR.get(kp.get("direction"), str(kp.get("direction")))
     prob = kp.get("up_probability")
-    outlook = kp.get("outlook") or ""
+    outlook = kp.get("outlook_label") or kp.get("outlook") or ""
     conf = kp.get("confidence", "")
     target = o.get("target_date", "")
     risk = (o.get("risk_assessment") or {}).get("risk_level", "")
