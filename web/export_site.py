@@ -662,6 +662,13 @@ _JS = r"""
       '<br>'+esc(result)+' · '+(q.intraday?'장중 참고':'종가 기준 참고')+' (확정 채점 아님)'+
       '<br>시세 날짜 '+esc(q.date||'')+' · 수집 '+esc(q.checked_at||q.traded_at||'')+' · '+esc(q.source||'네이버 증권')+'</div>';
   }
+  function stockForecastLabel(s){
+    if(s.directional_signal==='up')return '상승 예상';
+    if(s.directional_signal==='down')return '하락 예상';
+    if(s.directional_signal!=='flat')return '판단 미기록';
+    var bias=s.direction_bias==='up'?'상승 쪽 우세':s.direction_bias==='down'?'하락 쪽 우세':s.direction_bias==='neutral'?'방향 우세 없음':'세부 방향 미기록';
+    return '보합 예상 ('+bias+')';
+  }
   function card(s){var sig=s.directional_signal;
     var bias=s.direction_bias==='up'?'상승 쪽 우세':s.direction_bias==='down'?'하락 쪽 우세':s.direction_bias==='neutral'?'방향 우세 없음':'세부 방향 미기록';
     return '<div class="stock"'+(s.moderated?' style="border-style:dashed"':'')+'><div class="n"><span>'+esc(s.name)+(RK[s.name]?' <span class="ev">시총 '+RK[s.name]+'위</span>':'')+'</span>'+sigt(sig)+'</div>'+
@@ -685,7 +692,7 @@ _JS = r"""
     return '<svg class="stock-line" viewBox="0 0 600 180" role="img" aria-label="'+esc(rows[0].date+'부터 '+rows[rows.length-1].date+'까지 가격 흐름')+'"><path d="M20 160H580" stroke="currentColor" opacity=".15"/><polyline points="'+path+'" fill="none" stroke="var(--chart-price)" stroke-width="'+(small?5:3)+'" stroke-linecap="round" stroke-linejoin="round"/>'+(small?'':pts.map(function(p,i){return '<circle cx="'+p[0]+'" cy="'+p[1]+'" r="4" fill="var(--chart-price)"><title>'+esc(rows[i].date+' · '+fv(rows[i].close)+'원')+'</title></circle>';}).join(''))+'</svg>';
   }
   function simpleStock(s){var q=(D.stock_quotes||{})[s.name]||{},idx=stockItems.indexOf(s);
-    return '<button type="button" class="stock-tile" data-stock-open="'+idx+'" aria-label="'+esc(s.name)+' 주가와 분석 상세 보기"><span class="stock-top"><span class="stock-avatar">'+esc(s.name.slice(0,1))+'</span><span><strong>'+esc(s.name)+'</strong><small>'+esc(q.code||'종목코드 확인 중')+'</small></span><span class="stock-arrow">›</span></span><span class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</span><span class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct):'—')+' <small>전일 대비</small></span>'+stockLine(stockHistory(q),true)+'<span class="stock-bottom">AI '+(s.directional_signal==='up'?'상승 예상':s.directional_signal==='down'?'하락 예상':'보합 예상')+'<small>'+(q.status==='unavailable'?'갱신 실패 · 이전 자료':esc(q.date||'자료 대기'))+'</small></span></button>';
+    return '<button type="button" class="stock-tile" data-stock-open="'+idx+'" aria-label="'+esc(s.name)+' 주가와 분석 상세 보기"><span class="stock-top"><span class="stock-avatar">'+esc(s.name.slice(0,1))+'</span><span><strong>'+esc(s.name)+'</strong><small>'+esc(q.code||'종목코드 확인 중')+'</small></span><span class="stock-arrow">›</span></span><span class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</span><span class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct):'—')+' <small>전일 대비</small></span>'+stockLine(stockHistory(q),true)+'<span class="stock-bottom">AI '+esc(stockForecastLabel(s))+'<small>'+(q.status==='unavailable'?'갱신 실패 · 이전 자료':esc(q.date||'자료 대기'))+'</small></span></button>';
   }
   $('core').innerHTML=(D.core_stocks||[]).map(simpleStock).join('')||'<p class="empty">추천 종목을 기다리고 있어요</p>';
   $('watch').innerHTML=(D.watch_stocks||[]).map(simpleStock).join('')||'<p class="empty">관심 종목을 기다리고 있어요</p>';
