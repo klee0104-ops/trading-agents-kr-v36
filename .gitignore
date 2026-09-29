@@ -44,3 +44,16 @@ flow_debug.html
 memory_store_superseded.json
 logs/
 *.tmp
+
+# Private operational simulation ledger
+paper_portfolio.json
+paper_portfolio.json.lock
+paper_portfolio.pending
+
+long_research.json
+long_research.json.lock
+long_research.pending
+
+research_reports.json
+research_reports.json.lock
+research_reports.pending

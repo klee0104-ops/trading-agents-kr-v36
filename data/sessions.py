@@ -31,10 +31,10 @@ def kst_now() -> datetime:
 
 
 def next_weekday_after(d: date) -> date:
-    nd = d + timedelta(days=1)
-    while nd.weekday() >= 5:
-        nd += timedelta(days=1)
-    return nd
+    """다음 거래일(예측 대상일 표시용). (V3.29) 주말뿐 아니라 KRX 휴장일(data/krx_calendar)도 건너뛴다.
+    실제 채점은 여전히 시세 데이터에서 '실제로 열린 첫 거래일'을 찾는다."""
+    from data.krx_calendar import next_trading_day_after
+    return next_trading_day_after(d)
 
 
 def decide_score_after(now: datetime, latest_us_session: Optional[date] = None,
@@ -54,11 +54,15 @@ def decide_score_after(now: datetime, latest_us_session: Optional[date] = None,
 
 
 def market_status(now=None) -> dict:
-    """(V3.26) 국내 정규장 상태 (KST). 공휴일은 모른다 — 평일 휴장일도 '장중'으로 보일 수 있어 화면에 체결 시각을 함께 보인다.
+    """(V3.26) 국내 정규장 상태 (KST). (V3.29) KRX 휴장일 달력 반영 — 달력에 없는 해(2027~)의 평일 휴장일은 모른다.
     pre: 09:00 전, open: 09:00~15:30, closing: 15:30~15:40(종가 확정 대기), closed: 15:40 이후, weekend: 토·일."""
     now = now or kst_now()
     if now.weekday() >= 5:
         return {"code": "weekend", "label": "휴장(주말)"}
+    from data.krx_calendar import holiday_name  # (V3.29) KRX 휴장일
+    hn = holiday_name(now.date())
+    if hn:
+        return {"code": "holiday", "label": f"휴장({hn})"}
     m = now.hour * 60 + now.minute
     if m < 9 * 60:
         return {"code": "pre", "label": "장 시작 전"}

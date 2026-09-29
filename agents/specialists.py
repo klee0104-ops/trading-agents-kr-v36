@@ -77,7 +77,7 @@ def run_technical(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis, 
     prompt = (f"기준 시점: {snapshot.as_of}\n\n미국 지수 및 기술적 지표(코드로 계산됨):\n{_idx_lines(snapshot.us_indices)}\n"
               f"\n장세: 추세={ma.regime_trend}, 변동성={ma.regime_volatility}"
               f"{_reg_block(reg, {'us', 'quant'})}\n기술적 관점에서 판단하세요.")
-    return llm.complete_json(TECHNICAL_PROMPT, prompt, max_tokens=500)
+    return llm.complete_json(TECHNICAL_PROMPT, prompt, max_tokens=900)
 
 
 def run_macro_flow(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis, reg: Optional[list] = None) -> dict:
@@ -87,7 +87,7 @@ def run_macro_flow(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis,
     notes = "; ".join(n for n in ma.notes if any(k in n for k in ("원/달러", "금리", "WTI", "달러", "외국인"))) or "없음"
     prompt = (f"기준 시점: {snapshot.as_of}\n\n거시 지표:\n{lines}\n- {flow}\n\n규칙엔진 거시 관련 메모: {notes}"
               f"{_reg_block(reg, {'macro', 'flow'})}\n외국인 자금 환경 관점에서 판단하세요.")
-    return llm.complete_json(MACRO_PROMPT, prompt, max_tokens=500)
+    return llm.complete_json(MACRO_PROMPT, prompt, max_tokens=900)
 
 
 def run_semiconductor(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis, reg: Optional[list] = None) -> dict:
@@ -96,7 +96,7 @@ def run_semiconductor(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalys
               f"참고(나스닥): {_idx_lines(snapshot.us_indices, {'나스닥'})}\n{hint}"
               f"{_reg_block([e for e in reg if e['group'] != 'us' or e['name'] in ('SOX', '나스닥')] if reg else None, {'us'})}"
               f"\n반도체 관점에서 판단하세요.")
-    return llm.complete_json(SEMI_PROMPT, prompt, max_tokens=500)
+    return llm.complete_json(SEMI_PROMPT, prompt, max_tokens=900)
 
 
 LAST_NEWS_SOURCE = {"source": None}  # 파이프라인이 outcome 에 기록하기 위해 마지막 사용 출처를 남긴다
@@ -187,7 +187,7 @@ def run_news_sentiment(llm: LLMClient, snapshot: MarketSnapshot, titles: list[st
     else:
         body = f"최근 뉴스 제목 {len(titles)}건:\n" + "\n".join(f"- {t}" for t in titles)
     prompt = f"기준 시점: {snapshot.as_of}\n\n{body}\n\n시장 심리 관점에서 판단하세요."
-    return llm.complete_json(NEWS_PROMPT, prompt, max_tokens=500)
+    return llm.complete_json(NEWS_PROMPT, prompt, max_tokens=900)
 
 
 SPECIALISTS = [

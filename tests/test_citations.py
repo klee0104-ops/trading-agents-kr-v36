@@ -170,3 +170,10 @@ def test_pipeline_records_public_registry_and_cited_points(monkeypatch):
     assert semi["citation_ok"] and "[M2]" in semi["notable_points"][0] and "Yahoo Finance" in semi["notable_points"][0]
     for r in out["debate_qa"]:
         assert r["citation_rejected"] == [] and r["verified_count"] == r["total_count"] > 0
+
+
+def test_prompt_thresholds_are_not_treated_as_fabricated_numbers():
+    reg = _reg()
+    c = check_points(["SOX 등락 +1.10% 로 1.5% 기준 미만 [M2]"], reg)[0]
+    assert c["status"] == "ok"
+    assert check_points(["SOX 등락 +1.70% [M2]"], reg)[0]["status"] == "number_mismatch"

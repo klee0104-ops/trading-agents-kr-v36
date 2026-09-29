@@ -75,9 +75,9 @@ def _build_user_prompt(analyst_report: dict, transcript: list[dict]) -> str:
 
 def run_bull(llm: LLMClient, analyst_report: dict, transcript: list[dict]) -> dict:
     prompt = _build_user_prompt(analyst_report, transcript)
-    return llm.complete_json(BULL_SYSTEM_PROMPT, prompt, max_tokens=600)
+    return llm.complete_json(BULL_SYSTEM_PROMPT, prompt, max_tokens=900)
 
 
 def run_bear(llm: LLMClient, analyst_report: dict, transcript: list[dict]) -> dict:
     prompt = _build_user_prompt(analyst_report, transcript)
-    return llm.complete_json(BEAR_SYSTEM_PROMPT, prompt, max_tokens=600)
+    return llm.complete_json(BEAR_SYSTEM_PROMPT, prompt, max_tokens=900)

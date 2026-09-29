@@ -48,6 +48,21 @@ def _real_llm():
     )
 
 
+def cmd_market_day() -> int:
+    """(V3.29) 예약 아침 분석용: 오늘이 KRX 거래일이면 0, 주말·휴장일이면 2 (배치가 분석을 건너뛴다).
+    달력이 없는 해면 경고만 출력하고 0 (평일=거래일로 간주)."""
+    from data.sessions import kst_now
+    from data.krx_calendar import holiday_name, calendar_known, is_trading_day
+    today = kst_now().date()
+    if not calendar_known(today):
+        print(f"[경고] {today.year}년 KRX 휴장일 달력이 없습니다 (data/krx_calendar.py). 평일은 거래일로 간주합니다.")
+    if is_trading_day(today):
+        print(f"[거래일] {today}")
+        return 0
+    print(f"[휴장] {today} {holiday_name(today) or '주말'} — 아침 분석을 건너뜁니다 (AI 호출 없음).")
+    return 2
+
+
 def cmd_run():
     memory = MemoryStore(Config.MEMORY_DB_PATH)
     pipeline = TradingAgentsPipeline(_real_llm(), memory, debate_max_rounds=Config.DEBATE_MAX_ROUNDS)
@@ -277,7 +292,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     cmd, rest = sys.argv[1], sys.argv[2:]
-    if cmd == "run":
+    if cmd == "market-day":
+        sys.exit(cmd_market_day())
+    elif cmd == "run":
         cmd_run()
     elif cmd == "verify":
         cmd_verify()

@@ -149,9 +149,11 @@ def health():
 @app.route("/api/history")
 def history():
     memory = MemoryStore(Config.MEMORY_DB_PATH)
+    from memory.review_history import review_history
     return jsonify({
         "records": memory.all_records(),
         "stats": memory.compute_stats(),
+        "review_history": review_history(Config.MEMORY_DB_PATH, Config.LESSONS_PATH),
     })
 
 
@@ -279,11 +281,29 @@ def market_board():
     return jsonify(out)
 
 
+@app.route("/api/reports", methods=["GET"])
+def research_report_library():
+    from memory.research_reports import read_public
+    try: return jsonify(read_public(Config.REPORT_ARCHIVE_PATH))
+    except Exception as e: return _safe_error(e)
+
+
+@app.route("/api/long-research", methods=["GET"])
+def long_research_report():
+    from memory.long_report import read_public
+    try: return jsonify(read_public(Config.LONG_RESEARCH_PATH))
+    except Exception as e: return _safe_error(e)
+
+
 @app.route("/api/paper")
 def paper_account():
     """(V3.21) 가상 계좌 요약."""
     from execution.paper import PaperAccount
     try:
+        from execution.split_portfolio import read_summary
+        split = read_summary(Config.PAPER_PORTFOLIO_PATH)
+        if split is not None:
+            return jsonify(split)
         return jsonify(PaperAccount(Config.PAPER_ACCOUNT_PATH, Config.PAPER_INITIAL_CASH).summary())
     except Exception as e:  # noqa: BLE001
         return _safe_error(e)

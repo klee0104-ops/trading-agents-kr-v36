@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TradingAgents-KR 대시보드</title>
+<title>시그널랩 | Signal Lab — PC 대시보드</title>
 <meta name="ta-token" content="__TA_SESSION_TOKEN__">
 <link rel="stylesheet" href="/style.css">
 
@@ -11,12 +11,14 @@
 <body>
 <header class="topbar">
   <div class="topbar-inner">
-    <a class="brand" href="#today"><span class="logo">TA</span><span><b>TradingAgents-KR</b><small>KOSPI 멀티에이전트 · 참고용, 투자 자문 아님</small></span></a>
+    <a class="brand" id="brandHome" href="#today" aria-label="시그널랩 — 첫 화면으로"><span class="logo">SL</span><span><b>시그널랩 | Signal Lab</b><small>KOSPI 멀티에이전트 · 참고용, 투자 자문 아님</small></span></a>
     <nav class="tabs" id="tabs">
       <a href="#today" data-tab="today" class="active">오늘의 예측</a>
       <a href="#stocks" data-tab="stocks">관심 종목</a>
       <a href="#process" data-tab="process">분석 과정</a>
       <a href="#performance" data-tab="performance">성과·수익률</a>
+      <a href="#reports" data-tab="reports">팀 보고서</a>
+      <a href="#long" data-tab="long">장기 투자</a>
       <a href="#paper" data-tab="paper">가상 계좌</a>
       <a href="#backtest" data-tab="backtest">백테스트</a>
       <a href="#data" data-tab="data">데이터·이벤트</a>
@@ -37,30 +39,31 @@
   <section class="tab-panel active" id="tab-today">
     <div class="hero hero-3">
       <div class="hero-main">
-        <div class="card chart-card" id="chartCard">
-          <div class="chart-head"><span class="lbl">KOSPI</span><span class="px" id="kPx">—</span><span class="px-chg" id="kChg"></span><span class="lbl" id="kDate"></span></div>
-          <div id="kChart"><div class="empty">KOSPI 차트를 불러오는 중…</div></div>
-          <div class="chart-legend"><span><i style="background:var(--text-primary)"></i>종가</span><span><i style="background:var(--warning)"></i>20일선</span><span><i style="background:var(--accent)"></i>60일선</span><span><i style="background:var(--up);height:8px;width:8px;border-radius:50%"></i>내일 예측 방향</span></div>
-          <div class="ind-row" id="indRow"></div>
-        </div>
         <div class="card why-card" id="predictionCard">
           <h2>오늘의 KOSPI 예측</h2>
           <div class="empty">아직 실행 결과가 없습니다. 오른쪽 위에서 데모 또는 실제 분석을 실행해보세요.</div>
         </div>
+        <div class="card chart-card" id="chartCard">
+          <div class="chart-head"><span class="lbl">KOSPI</span><span class="px" id="kPx">—</span><span class="px-chg" id="kChg"></span><span class="lbl" id="kDate"></span></div>
+          <div id="kChart"><div class="empty">KOSPI 차트를 불러오는 중…</div></div>
+          <div class="chart-legend"><span><i style="background:var(--chart-price)"></i>종가</span><span><i class="sw20"></i>20일선</span><span><i class="sw60"></i>60일선</span><span><i style="background:var(--up);height:8px;width:8px;border-radius:50%"></i>AI 예측 방향 (확률은 위 예측 카드 · 지수 등락률 아님)</span></div>
+          <div class="ind-row" id="indRow"></div>
+        </div>
+
       </div>
       <aside class="card board" id="marketBoard">
         <h2>시장 현황 <span class="h2-sub" id="boardTime"></span></h2>
         <div class="empty">시세를 불러오는 중…</div>
       </aside>
     </div>
-    <div class="kpi-row" id="kpiRow" style="margin-top:4px"></div>
+    <div id="reviewNotice" class="audit-note" hidden></div><div class="kpi-row" id="kpiRow" style="margin-top:4px"></div>
     <div class="card">
       <h2>복기 교훈 <span class="h2-sub">오늘 참고한 것</span></h2>
       <div id="lessonsBox" class="empty">아직 실행 결과가 없습니다.</div>
     </div>
   </section>
 
-<section class="tab-panel" id="tab-stocks"><div id="stocksEmpty" class="empty">분석 결과를 기다리고 있습니다.</div><div class="card" id="stocksCard" style="display:none"><h2>핵심 종목</h2><div class="stock-grid" id="coreStockGrid"></div><h2>관심 종목</h2><div class="stock-grid" id="watchStockGrid"></div><div id="watchNote"></div></div></section>
+<section class="tab-panel" id="tab-stocks"><div id="stocksEmpty" class="empty">분석 결과를 기다리고 있습니다.</div><div class="card" id="stocksCard" style="display:none"><h2>추천 종목</h2><div class="stock-grid" id="coreStockGrid"></div><h2>관심 종목</h2><div class="stock-grid" id="watchStockGrid"></div><div id="watchNote"></div></div></section>
 <section class="tab-panel" id="tab-process"><div class="grid"><div class="card"><h2>분석가 판단</h2><div id="analystsBox" class="empty">표시할 데이터가 없습니다.</div></div>
 <div class="card"><h2>Bull / Bear 토론</h2><div id="debateList" class="empty">표시할 데이터가 없습니다.</div></div>
 <div class="card"><h2>검증 · QA</h2><div id="qaBox" class="empty">표시할 데이터가 없습니다.</div></div>
@@ -68,11 +71,11 @@
 <div class="card"><h2>리스크 판단</h2><div id="riskBox" class="empty">표시할 데이터가 없습니다.</div></div>
 <div class="card"><h2>입력 지표</h2><div id="inputsBox" class="empty">표시할 데이터가 없습니다.</div></div>
 <div class="card"><h2>유사 사례</h2><div id="similarCases" class="empty">표시할 데이터가 없습니다.</div></div>
-</div></section><section class="tab-panel" id="tab-performance"><div class="card"><h2>수익률 · 비용 차감</h2><div id="returnsBox" class="empty">표시할 데이터가 없습니다.</div></div>
+</div></section><section class="tab-panel" id="tab-performance"><div class="card"><h2>과거 전략 성과 · 누적 · 비용 차감</h2><div id="returnsBox" class="empty">표시할 데이터가 없습니다.</div></div>
 <div class="card"><h2>AI vs 단순 규칙</h2><div id="baselineBox" class="empty">표시할 데이터가 없습니다.</div></div>
 <div class="card"><h2>에이전트별 성과</h2><div id="agentBox" class="empty">표시할 데이터가 없습니다.</div></div>
-<div class="card"><h2>예측 기록</h2><div id="historyBox" class="empty">표시할 데이터가 없습니다.</div></div>
-</section><section class="tab-panel" id="tab-paper"><div class="card"><h2>가상 계좌 · 모의투자</h2><div id="paperBox" class="empty">표시할 데이터가 없습니다.</div></div>
+<div class="card"><h2>예측 기록</h2><div id="reviewHistory"></div><div id="historyBox" class="empty">표시할 데이터가 없습니다.</div></div>
+</section><section class="tab-panel" id="tab-reports"><div class="card"><h2>투자팀 리서치 라이브러리</h2><div id="reportLibrary"></div></div></section><section class="tab-panel" id="tab-long"><div class="card"><h2>장기 투자팀 보고서</h2><div id="longResearch"></div></div></section><section class="tab-panel" id="tab-paper"><div class="card"><h2>가상 계좌 · 모의투자</h2><div id="paperBox" class="empty">표시할 데이터가 없습니다.</div></div>
 </section><section class="tab-panel" id="tab-backtest"><div class="card"><h2>백테스트 · 과거 데이터 참고치</h2><div id="backtestBox" class="empty">표시할 데이터가 없습니다.</div></div>
 </section><section class="tab-panel" id="tab-data"><div class="card"><h2>변동성 이벤트 아카이브</h2>
 <div class="event-controls"><label for="eventStockSelect">종목</label><select id="eventStockSelect"><option value="">종목 선택…</option></select><button id="btnRefreshEvents" class="btn">새로고침</button></div>

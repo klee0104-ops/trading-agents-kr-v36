@@ -163,11 +163,17 @@ class TradingAgentsPipeline:
                                           "rank": u.get("rank"), "momentum": None, "news_count": 0, "news_sample": []}
                                          for u in news_universe]
         sf_text = facts_text(stock_facts)
+        from data.etf_forecast import collect as collect_etf,validate as validate_etf
+        import json
+        etf_now=kst_now();etf_target=str(self._decide_target(snapshot)[2])
+        etf_evidence=collect_etf(etf_now,etf_target) if not self._is_demo() and not self.backtest_mode else {'status':'held','sources':[]}
+        source_registry.extend(etf_evidence['sources'])
+        etf_context='\n[ETF 운용 전용 자료]\n'+json.dumps(etf_evidence,ensure_ascii=False)
         result = run_trader(self.llm, analyst_report, transcript, risk_assessment,
                              history_context, verification=verification,
                              use_web_search=not self.backtest_mode,
                              rule_context=build_context_text(market_analysis),
-                             moderation_text=moderation_text, stock_facts_text=sf_text,
+                             moderation_text=moderation_text, stock_facts_text=sf_text+etf_context,
                              watch_names=[u["name"] for u in watch] or None)
 
         # 6-0) 종목 중재자 (V3.11): 근거 없는 종목 신호를 보합으로 되돌린다 (AI 1회)
@@ -206,11 +212,16 @@ class TradingAgentsPipeline:
         rule_check = detect_conflicts(effective_risk, result, debate_qa,
                                       expected_watch=len(watch) if watch else Config.WATCH_STOCK_COUNT)
         if rule_check["conflict"]:
-            final_qa = verify_final_result(self.llm, result, transcript, effective_risk)
+            final_qa = verify_final_result(self.llm, result, transcript, effective_risk,
+                                           source_registry=source_registry, debate_qa=debate_qa)
             final_qa["rule_conflict_reasons"] = rule_check["reasons"]
             final_qa["llm_verification_triggered"] = True
         else:
             final_qa = {"consistent": True, "issues": [], "llm_verification_triggered": False}
+
+        result['etf_execution']=validate_etf(result.get('etf_execution'),etf_evidence,etf_now,etf_target)
+        if final_qa.get('consistent') is not True:
+            result['etf_execution'].update(status='held',selected_code=None,weight=0,note='최종 QA 미승인 · ETF 신규 매매 보류')
 
         # 7) 기록 저장 (백테스트 중에는 실거래 기록과 섞이지 않도록 호출부에서 별도 처리)
         if not self.backtest_mode:
@@ -540,6 +551,11 @@ class TradingAgentsPipeline:
 
     def _paper_settle(self, rec: dict, session) -> None:
         """(V3.21) 가상 계좌: 그날 ETF 시가에 포지션대로 리밸런싱, 종가 평가. 실기록에서만(백테스트 제외)."""
+        from pathlib import Path
+        # The new book executes at observed prices. Never backfill the legacy
+        # opening-price simulation while that book exists, even if it is paused.
+        if Path(Config.PAPER_PORTFOLIO_PATH).exists():
+            return
         if self.memory.path is None or rec.get("position") is None:
             return
         fetch = getattr(self.data_provider, "fetch_etf_ohlc", None)

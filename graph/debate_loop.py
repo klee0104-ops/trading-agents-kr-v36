@@ -1,15 +1,35 @@
 """
-토론 루프. Bull과 Bear가 서로의 직전 발언을 보고 반박하는 과정을
-설정된 라운드 수만큼 반복한다. 이번 요청("루프까지 적용")의 핵심 부분.
-
-종료 조건은 두 가지 중 하나:
-1. max_rounds에 도달
-2. 두 에이전트의 confidence 차이가 매우 작고(수렴), 최소 2라운드는 진행된 경우
-   -> 굳이 더 토론해도 새로운 정보가 안 나올 때 조기 종료해서 토큰을 아낀다.
+라운드마다 같은 이전 기록을 보고 독립 발언한다. 첫 라운드는 둘 다 빈 기록이다.
+동일 라운드의 상대 발언은 다음 라운드부터 공개한다. 순차 호출이지만 정보는 대칭이다.
+양쪽 모두 자기 직전 발언의 주장·근거를 반복하고 확신도도 안정됐을 때만 조기 종료한다.
+이 종료는 반복 감지이며 합의나 정답 판정이 아니다.
 """
 from __future__ import annotations
+from copy import deepcopy
+import math
 from agents.base import LLMClient
 from agents.researchers import run_bull, run_bear
+
+
+def _unchanged(previous: dict, current: dict, threshold: float) -> bool:
+    """Malformed or empty answers must never count as stable evidence."""
+    if threshold < 0:
+        return False
+    argument = current.get("argument")
+    evidence = current.get("evidence")
+    if not isinstance(argument, str) or not argument.strip():
+        return False
+    if not isinstance(evidence, list) or not evidence or not all(isinstance(e, str) and e.strip() for e in evidence):
+        return False
+    if argument != previous.get("argument") or evidence != previous.get("evidence"):
+        return False
+    try:
+        before, after = float(previous["confidence"]), float(current["confidence"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (math.isfinite(before) and math.isfinite(after)
+            and 0 <= before <= 1 and 0 <= after <= 1
+            and abs(before - after) <= threshold)
 
 
 def run_debate_loop(llm: LLMClient, analyst_report: dict, max_rounds: int = 3,
@@ -17,18 +37,17 @@ def run_debate_loop(llm: LLMClient, analyst_report: dict, max_rounds: int = 3,
     transcript: list[dict] = []
 
     for round_idx in range(max_rounds):
-        bull_turn = run_bull(llm, analyst_report, transcript)
+        history = deepcopy(transcript)
+        bull_turn = run_bull(llm, analyst_report, deepcopy(history))
         bull_turn["round"] = round_idx + 1
-        transcript.append(bull_turn)
-
-        bear_turn = run_bear(llm, analyst_report, transcript)
+        bear_turn = run_bear(llm, analyst_report, deepcopy(history))
         bear_turn["round"] = round_idx + 1
-        transcript.append(bear_turn)
+        transcript.extend([bull_turn, bear_turn])
 
-        # 조기 종료 체크: 최소 2라운드(4턴) 진행 후, confidence가 수렴하면 멈춘다.
+        # 서로 다른 입장의 확신도를 비교하지 않고, 각자의 발언 반복을 확인한다.
         if round_idx >= 1:
-            diff = abs(bull_turn.get("confidence", 0.5) - bear_turn.get("confidence", 0.5))
-            if diff < convergence_threshold:
+            if (_unchanged(history[-2], bull_turn, convergence_threshold)
+                    and _unchanged(history[-1], bear_turn, convergence_threshold)):
                 break
 
     return transcript

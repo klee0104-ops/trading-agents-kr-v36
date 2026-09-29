@@ -24,6 +24,10 @@ if %HOUR% GEQ 9 if %HOUR% LSS 16 (
   exit /b 0
 )
 
+rem KRX 휴장일(주말/공휴일/연말 휴장)이면 아침 분석을 건너뜀 - AI 호출 없음. 달력은 data\krx_calendar.py
+python cli.py market-day >> "%LOG%" 2>&1
+if errorlevel 2 exit /b 0
+
 rem 1) 어제 예측 채점 (LLM 호출 없음) - 적중률 통계가 쌓입니다
 echo --- 1/3 어제 예측 채점 --- >> "%LOG%"
 python cli.py verify >> "%LOG%" 2>&1

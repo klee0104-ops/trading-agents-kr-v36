@@ -48,6 +48,8 @@ def apply_reviews(final_result: dict, review: dict) -> dict:
             if r.get("action") == "flat" and s.get("directional_signal") != "flat":
                 s["original_signal"] = s.get("directional_signal")
                 s["directional_signal"] = "flat"
+                s["direction_bias"] = "unknown"
+                s["bias_confidence"] = "unknown"
                 s["moderated"] = True
                 s["moderation_reason"] = r.get("reason", "")
                 changed += 1

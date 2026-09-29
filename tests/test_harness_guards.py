@@ -209,3 +209,62 @@ def test_pipeline_records_history_last_date(monkeypatch):
     out = TradingAgentsPipeline(MockLLMClient(), MemoryStore(None), data_provider=_HistProvider(),
                                 debate_max_rounds=2).run(snapshot=_snap())
     assert out["quant"]["history_last_date"]
+
+
+def test_tests_never_touch_real_ledgers():
+    """pytest 를 직접 실행해도 실제 원장·기록 경로가 아닌 임시 경로를 쓴다."""
+    import os
+    from config import Config
+    for k in ("MEMORY_DB_PATH", "LESSONS_PATH", "PAPER_ACCOUNT_PATH", "PAPER_PORTFOLIO_PATH", "LONG_RESEARCH_PATH",
+              "REPORT_ARCHIVE_PATH", "LAST_OUTCOME_PATH", "EVENT_ARCHIVE_DB_PATH"):
+        p = os.path.abspath(str(getattr(Config, k)))
+        assert not p.startswith(str(ROOT) + os.sep) or "pytest" in p, (k, p)
+
+
+def test_portfolio_lock_works_on_this_os(tmp_path):
+    from tools.paper_portfolio import locked
+    with locked(tmp_path / "ledger.json"):
+        pass
+
+
+def test_debate_qa_broken_json_does_not_crash_and_verifies_nothing():
+    """(V3.29) 실전 시험에서 QA 응답이 잘려 전체가 멈춘 사고 재발 방지: 깨진 JSON → 미검증, 예외 없음."""
+    from agents.base import MockLLMClient
+    from agents.qa_verifier import verify_debate_evidence
+
+    class Broken(MockLLMClient):
+        def complete(self, system, user, max_tokens=1500, use_web_search=False):
+            super().complete(system, user, max_tokens, use_web_search)
+            return '{"results": [{"evidence": "SOX'  # 잘린 응답
+    t = [{"stance": "bull", "round": 1, "argument": "a", "evidence": ["SOX 등락 +1.10%", "VIX 등락 +2.00%"]}]
+    r = verify_debate_evidence(Broken(), t, {"summary": "s"}, "")[0]
+    assert r["verified_count"] == 0 and r["total_count"] == 2
+
+
+def test_llm_output_budgets_are_not_tight():
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    qa = (root / "agents/qa_verifier.py").read_text(encoding="utf-8")
+    assert "QA_DEBATE_SYSTEM_PROMPT, user_prompt, max_tokens=1200" in qa
+    for f in ("agents/specialists.py", "agents/researchers.py"):
+        vals = [int(v) for v in re.findall(r"max_tokens=(\d+)", (root / f).read_text(encoding="utf-8"))]
+        assert vals and min(vals) >= 900, (f, vals)
+
+
+def test_qa_matches_evidence_despite_whitespace_or_arrow_changes_but_not_content():
+    from agents.base import MockLLMClient
+    from agents.qa_verifier import verify_debate_evidence
+    import json as _j
+
+    class Echo(MockLLMClient):
+        def complete(self, system, user, max_tokens=1500, use_web_search=False):
+            super().complete(system, user, max_tokens, use_web_search)
+            return _j.dumps({"results": [
+                {"evidence": "MACD 히스토그램 = 12.011 -> 상승 모멘텀  [Q3]", "verified": True},   # 공백·화살표만 다름
+                {"evidence": "SOX 등락 +9.99% [M4]", "verified": True},                           # 내용이 다름 → 불인정
+            ]}, ensure_ascii=False)
+    t = [{"stance": "bull", "round": 1, "argument": "a",
+          "evidence": ["MACD 히스토그램 = 12.011 → 상승 모멘텀 [Q3]", "SOX 등락 -1.61% [M4]"]}]
+    r = verify_debate_evidence(Echo(), t, {"summary": "s"}, "")[0]
+    assert r["verified_count"] == 1 and r["qa_unmatched"] == 1

@@ -16,6 +16,16 @@ GitHub에는 소스만 Private 저장소로 보관한다. 협업자를 추가하
 
 ## 파일 전달
 
+### KOSPI 시세 전용 자동 게시 (2026-09-29)
+
+- Windows 작업 `TradingAgents-KR PublicQuotes`: 로그인된 PC에서 5분마다 `pythonw -B -m tools.refresh_public_quotes` 실행. 배터리에서도 실행하며, 중복 실행은 건너뛰고 3분 후 종료한다. 절전 PC를 깨우거나 로그인 정보를 저장하지 않는다.
+- 기존 공개 HTML의 KOSPI 숫자·차트·시세 기준 시각만 변경한다. 장중 값은 미확정으로 표시한다. AI 분석, 정식 채점, 모의계좌 평가·매매, 예측 DB 쓰기는 하지 않는다. 미국 지수·거시 지표는 분석 당시 값이다.
+- 네이버 시세 조회는 키 없이 수행하며, 공개 페이지는 외부 연결 차단을 유지한다. 공개 시세 수집 시각과 보고서 생성 시각·분석 시각은 별도 표시한다.
+- 같은 시세는 재게시하지 않는다. 수집·보안 검증·업로드 실패 시 기존 공개본을 유지한다. 결과는 `logs/public_quotes_status.json`에 상태와 시각만 남긴다. 실패는 다음 5분 작업에서 재시도한다.
+- GitHub Pages 기본 배포에는 시간당 10회 소프트 제한이 있으므로 5분은 조회·게시 시도 주기이며 화면 반영 SLA가 아니다. 배포 대기·브라우저 5분 새로고침까지 추가 지연이 가능하다.
+- 중지: PowerShell에서 `Disable-ScheduledTask -TaskName 'TradingAgents-KR PublicQuotes'`. 재개: `Enable-ScheduledTask -TaskName 'TradingAgents-KR PublicQuotes'`.
+- 설치/복구: 프로젝트의 `tools/register_public_quotes.ps1` 실행. 기존 아침 분석·마감 채점 작업은 변경하지 않는다.
+
 `공유페이지_만들기.bat` 또는 `python cli.py export-site` 실행 후 `site/index.html` 한 파일만 전달한다. 보고서는 생성 당시의 스냅샷이며 자동 갱신되지 않는다. 사용자가 공유를 허용한 가상계좌 수익률·평가금액·수익곡선·보유 종목·최근 모의 체결 내역을 포함한다. 화면에는 모의투자이며 실제 자금 거래가 없다고 표시한다. 공유본에는 API 호출 기능이 없으며 뉴스 제목 및 키 마스킹을 적용한다. 외부 폰트 요청 없이 브라우저 기본 대체 폰트를 사용한다. 원본 계좌 JSON·API 키·DB는 계속 GitHub에서 제외한다.
 
 수신자는 HTML 내부에 포함된 분석과 예측 기록을 읽고 저장·재전달할 수 있다. 파일을 전달한 뒤 회수하거나 지정인만 열도록 제한하는 기능은 없다. 파일 안에 JavaScript 비밀번호 창을 넣는 것은 접근 통제가 아니다.

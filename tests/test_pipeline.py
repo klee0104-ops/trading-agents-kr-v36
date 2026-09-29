@@ -40,8 +40,7 @@ def test_debate_loop_runs_expected_rounds():
 def test_debate_loop_early_stops_on_convergence():
     llm = MockLLMClient()
     analyst_report = {"summary": "test"}
-    # Mock의 bull confidence=0.62, bear=0.55 -> diff=0.07
-    # threshold를 0.1로 주면 2라운드(4턴) 후 바로 수렴 판정으로 멈춰야 한다
+    # Mock은 각 역할의 주장·근거·확신도를 반복하므로 2라운드 후 반복 감지로 종료한다.
     transcript = run_debate_loop(llm, analyst_report, max_rounds=5, convergence_threshold=0.1)
     assert len(transcript) == 4  # round 1(2턴) + round 2(2턴) 후 종료
 

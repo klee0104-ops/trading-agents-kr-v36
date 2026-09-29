@@ -18,6 +18,10 @@ def save_last_outcome(outcome: dict, path: str, mode: str = "real") -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
     os.replace(tmp, path)
+    if mode == "real":
+        from pathlib import Path
+        from memory.research_reports import archive_short
+        archive_short(json.loads(text), Path(path).parent / 'research_reports.json')
 
 
 def load_last_outcome(path: str) -> dict | None:

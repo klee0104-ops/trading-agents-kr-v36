@@ -197,9 +197,13 @@ def _nums(text: str) -> list[tuple[float, str]]:
     return out
 
 
+# (V3.28) 프롬프트가 판단 기준으로 알려준 임계값(예: "SOX ±1.5% 이상", "±0.5% 이내")은 자료 인용이 아니므로 허용
+RULE_THRESHOLDS = (0.5, 1.5)
+
+
 def _numbers_match(claim: str, sources: list[str]) -> Optional[str]:
     """문장 속 '의미 있는 수치'(소수점 또는 %·억·원 단위)가 인용 자료의 수치 중 하나와 맞는지. 틀리면 그 수치."""
-    src_vals = [v for s in sources for v, _u, _d in _nums(s)]
+    src_vals = [v for s in sources for v, _u, _d in _nums(s)] + list(RULE_THRESHOLDS)
     for v, unit, has_dot in _nums(claim):
         if not (has_dot or unit):
             continue
