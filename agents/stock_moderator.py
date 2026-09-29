@@ -45,9 +45,16 @@ def apply_reviews(final_result: dict, review: dict) -> dict:
             if not r:
                 continue
             s["moderator_note"] = r.get("reason", "")
+            if r.get("action") == "flat":
+                s["assessment_status"] = "held"
+                s["assessment_note"] = "중재 검토에서 방향 근거 미충족"
+                s["direction_bias"] = "unknown"
+                s["bias_confidence"] = "unknown"
             if r.get("action") == "flat" and s.get("directional_signal") != "flat":
                 s["original_signal"] = s.get("directional_signal")
                 s["directional_signal"] = "flat"
+                s["assessment_status"] = "held"
+                s["assessment_note"] = "중재 검토에서 방향 근거 미충족"
                 s["direction_bias"] = "unknown"
                 s["bias_confidence"] = "unknown"
                 s["moderated"] = True

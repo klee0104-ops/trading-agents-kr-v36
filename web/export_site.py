@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SITE_DIR = ROOT / "site"
 
 _STOCK_FIELDS = ("name", "sector", "related_us_indicator", "sensitivity", "directional_signal", "reason",
-                 "moderated", "original_signal", "moderation_reason", "direction_bias", "bias_confidence")
+                 "moderated", "original_signal", "moderation_reason", "direction_bias", "bias_confidence", "assessment_status", "assessment_note", "bias_reason")
 
 
 _NEWS_PREFIX = re.compile(r"^(\[[^\]]*\]\s*)+")
@@ -648,7 +648,7 @@ _JS = r"""
   $('inds').innerHTML=IN.map(function(t){return '<div class="ind"><div class="k">'+esc(t[0])+'</div><div class="v mono">'+esc(String(t[1]))+'</div>'+(t[2]?'<div class="t">'+esc(String(t[2]))+'</div>':'')+'</div>';}).join('');
 
   var RK=D.stock_rank||{};
-  function sigt(g){return g==='up'?'<span class="up">▲ 상승</span>':g==='down'?'<span class="down">▼ 하락</span>':'<span class="ev">— 보합</span>';}
+  function sigt(g){if(g==='held')return '<span class="ev">판단 보류</span>';return g==='up'?'<span class="up">▲ 상승</span>':g==='down'?'<span class="down">▼ 하락</span>':'<span class="ev">— 보합</span>';}
   function predictionComparison(sig,q,target,unit){
     var pred=sig==='up'?'▲ 상승':sig==='down'?'▼ 하락':sig==='flat'?'— 보합':'판단 없음';
     var lead='<div class="ev" style="padding:10px;border:1px solid var(--line);border-radius:9px"><b>예측 '+esc(pred)+'</b> · 대상 '+esc(target||'미기록');
@@ -663,19 +663,21 @@ _JS = r"""
       '<br>시세 날짜 '+esc(q.date||'')+' · 수집 '+esc(q.checked_at||q.traded_at||'')+' · '+esc(q.source||'네이버 증권')+'</div>';
   }
   function stockForecastLabel(s){
+    if(s.assessment_status==='held')return '판단 보류 · '+(s.assessment_note||'근거 부족');
+    if(!s.assessment_status&&s.directional_signal==='flat'&&!['up','down','neutral'].includes(s.direction_bias))return '기존 보합 기록 · 세부 판단 미검증';
     if(s.directional_signal==='up')return '상승 예상';
     if(s.directional_signal==='down')return '하락 예상';
     if(s.directional_signal!=='flat')return '판단 미기록';
     var bias=s.direction_bias==='up'?'상승 쪽 우세':s.direction_bias==='down'?'하락 쪽 우세':s.direction_bias==='neutral'?'방향 우세 없음':'세부 방향 미기록';
     return '보합 예상 ('+bias+')';
   }
-  function card(s){var sig=s.directional_signal;
+  function card(s){var sig=s.assessment_status==='held'?'held':s.directional_signal;
     var bias=s.direction_bias==='up'?'상승 쪽 우세':s.direction_bias==='down'?'하락 쪽 우세':s.direction_bias==='neutral'?'방향 우세 없음':'세부 방향 미기록';
     return '<div class="stock"'+(s.moderated?' style="border-style:dashed"':'')+'><div class="n"><span>'+esc(s.name)+(RK[s.name]?' <span class="ev">시총 '+RK[s.name]+'위</span>':'')+'</span>'+sigt(sig)+'</div>'+
       '<div class="m">'+esc(s.related_us_indicator||s.sector||'')+' · 민감도 '+esc(s.sensitivity||'-')+'</div>'+
       (s.moderated?'<div class="chip" style="color:var(--warn);border-color:var(--warn)">중재자 조정 · 원래 '+(s.original_signal==='up'?'상승':'하락')+'</div>':'')+
       (sig==='flat'?'<div class="ev">보합권 · '+bias+' · 확신도 '+esc(({low:'낮음',mid:'보통',high:'높음'})[s.bias_confidence]||'미기록')+'</div>':'')+predictionComparison(sig,(D.stock_quotes||{})[s.name],D.target_date)+
-      '<div class="r">'+esc(s.moderated&&s.moderation_reason?s.moderation_reason:(s.reason||''))+'</div></div>';}
+      '<div class="r">'+(s.assessment_status==='held'?esc(s.assessment_note||'근거 부족')+' · ':'')+esc(s.bias_reason||'')+'<br>'+esc(s.moderated&&s.moderation_reason?s.moderation_reason:(s.reason||''))+'</div></div>';}
   $('core').innerHTML=(D.core_stocks||[]).map(card).join('')||'<div class="empty">없음</div>';
   $('watch').innerHTML=((D.watch_stocks||[]).map(card).join('')||'<div class="empty">없음</div>')+
     (D.stock_moderation?'<div class="ev" style="grid-column:1/-1">관심 종목은 KOSPI 시총 100 중 무작위 추첨. 종목 중재자가 '+D.stock_moderation.reviewed+'종목을 검토해 '+D.stock_moderation.adjusted_to_flat+'종목을 보합으로 조정했습니다.</div>':'');
@@ -825,7 +827,7 @@ function reportLibraryView(library,esc){
       body+='<section><h3>02 · 분석가별 근거</h3>'+(r.roles||[]).map(function(a){return '<div class="report-role"><h4>'+esc(roles[a.name]||a.name)+'</h4><p>'+esc(a.summary)+'</p>'+lines(a.points)+'<small>출처 검사: '+(a.citation_ok===true?'통과':a.citation_ok===false?'미통과 · 해석 주의':'별도 상태 미기록')+'</small></div>';}).join('')+'</section>';
       body+='<section><h3>03 · 상승·하락 토론과 중재</h3>'+(r.debate||[]).map(function(t){return '<div class="report-debate"><b>'+esc(t.round||'')+'차 · '+(t.stance==='bull'?'상승 측':t.stance==='bear'?'하락 측':esc(t.stance))+'</b><p>'+esc(t.argument)+'</p>'+lines(t.evidence)+'</div>';}).join('')+'<p><b>중재 판단</b> '+esc((r.moderation||{}).summary||'기록 없음')+'</p></section>';
       body+='<section><h3>04 · 위험과 검증</h3><p>'+esc((r.risk||{}).risk_level||'미기록')+' · '+esc((r.risk||{}).summary||'위험 요약 미기록')+'</p><p>최종 정합성 '+(q.consistent===true?'통과':q.consistent===false?'미통과':'미기록')+' · 위험 단계 '+(q.risk_passed===true?'통과':q.risk_passed===false?'미통과':'미기록')+'</p><p>검증 통과는 기록의 정합성 확인이며 미래 예측의 정확성을 보증하지 않습니다. 이후 뉴스·시세가 달라지면 판단을 다시 확인해야 합니다.</p></section>';
-      body+='<section><h3>05 · 종목별 판단</h3>'+(r.stocks||[]).map(function(s){return '<p><b>'+esc(s.name)+' · '+esc(s.directional_signal||'관찰')+'</b><br>'+esc(s.reason)+'</p>';}).join('')+'</section>';
+      body+='<section><h3>05 · 종목별 판단</h3>'+(r.stocks||[]).map(function(s){return '<p><b>'+esc(s.name)+' · '+esc(stockForecastLabel(s))+'</b><br>'+esc(s.reason)+'</p>';}).join('')+'</section>';
     }
     if(!long)body+=etfPlanView(r.execution,esc);
     var sources=long?(r.research||{}).sources:r.sources;

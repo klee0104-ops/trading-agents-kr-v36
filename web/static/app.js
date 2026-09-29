@@ -418,11 +418,12 @@ function initTheme() {
 const STOCK_RANK = () => Object.fromEntries((lastOutcome?.news_universe || []).map(u => [u.name, u.rank]));
 
 function sigText(sig) {
+  if(sig === "held") return "판단 보류 · 근거 미충족";
   return sig === "up" ? "▲ 상승 신호" : sig === "down" ? "▼ 하락 신호" : "— 보합";
 }
 
 function stockCard(s) {
-  const sig = s.directional_signal;
+  const sig = s.assessment_status === "held" ? "held" : s.directional_signal;
   const rank = STOCK_RANK()[s.name];
   const mod = s.moderated ? `<div class="mod-badge" title="${escapeHtml(s.moderation_reason || "")}">중재자 조정 · 원래 ${sigText(s.original_signal).replace(" 신호", "")}</div>` : "";
   return `
@@ -430,8 +431,9 @@ function stockCard(s) {
       <div class="name">${escapeHtml(s.name)}${rank ? ` <span class="rank">시총 ${rank}위</span>` : ""}</div>
       <div class="meta">${escapeHtml(s.related_us_indicator || s.sector || "")} · 민감도 ${escapeHtml(s.sensitivity || "-")}</div>
       <div class="sig ${sig === "up" ? "up" : sig === "down" ? "down" : "flat"}">${sigText(sig)}</div>
-      ${sig==='flat'?`<div class="meta">보합권 · ${escapeHtml(({up:'상승 쪽 우세',down:'하락 쪽 우세',neutral:'방향 우세 없음'})[s.direction_bias]||'세부 방향 미기록')} · 확신도 ${escapeHtml(({low:'낮음',mid:'중간',high:'높음'})[s.bias_confidence]||'미기록')}</div>`:''}
+      ${sig==='flat'?`<div class="meta">보합권 · ${escapeHtml(({up:'상승 쪽 우세',down:'하락 쪽 우세',neutral:'방향 우세 없음'})[s.direction_bias]||'기존 기록 · 세부 판단 미검증')} · 확신도 ${escapeHtml(({low:'낮음',mid:'중간',high:'높음'})[s.bias_confidence]||'미기록')}</div>`:''}
       ${mod}
+      <div class="meta">${escapeHtml(s.bias_reason || s.assessment_note || "")}</div>
       <div class="reason">${escapeHtml(s.moderated && s.moderation_reason ? s.moderation_reason : (s.reason || ""))}</div>
     </div>
   `;

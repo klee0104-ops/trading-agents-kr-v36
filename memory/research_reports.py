@@ -37,7 +37,7 @@ def short_report(envelope):
             'qa':{'consistent':(o.get('final_qa') or {}).get('consistent'),
                   'risk_passed':(o.get('verification') or {}).get('verification_passed')},
             'sources':[pick(r,('id','kind','source','date','stock','name')) for r in sorted(o.get('source_registry',[]),key=lambda r:r.get('id') not in ('M901','M902','M903'))[:60]],
-            'stocks':[pick(s,('name','directional_signal','direction_bias','reason'),titles) for k in ('core_stocks','watch_stocks') for s in fr.get(k,[])][:16]}
+            'stocks':[pick(s,('name','directional_signal','direction_bias','reason','bias_reason','assessment_status','assessment_note'),titles) for k in ('core_stocks','watch_stocks') for s in fr.get(k,[])][:16]}
 
 def append_report(path,report):
     if not report:return

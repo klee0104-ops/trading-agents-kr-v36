@@ -35,23 +35,23 @@ TRADER_SYSTEM_PROMPT = """당신은 최종 의사결정을 내리는 트레이�
   },
   "core_stocks": [
     {"name": "삼성전자", "related_us_indicator": "SOX", "sensitivity": "high/mid/low",
-     "directional_signal": "up 또는 down", "reason": "..."},
+     "directional_signal": "up 또는 down", "reason": "종목별 근거", "assessment_status": "assessed 또는 held", "direction_bias": "up/down/neutral/unknown", "bias_confidence": "low/mid/high/unknown", "bias_reason": "상승/하락 근거를 비교한 이유 또는 판단 불가 사유"},
     {"name": "SK하이닉스", "related_us_indicator": "SOX", "sensitivity": "high/mid/low",
-     "directional_signal": "up 또는 down", "reason": "..."}
+     "directional_signal": "up 또는 down", "reason": "종목별 근거", "assessment_status": "assessed 또는 held", "direction_bias": "up/down/neutral/unknown", "bias_confidence": "low/mid/high/unknown", "bias_reason": "상승/하락 근거를 비교한 이유 또는 판단 불가 사유"}
   ],
   "watch_stocks": [
     {"name": "종목명", "sector": "섹터", "related_us_indicator": "지표",
-     "sensitivity": "high/mid/low", "directional_signal": "up, down 또는 flat", "reason": "..."}
+     "sensitivity": "high/mid/low", "directional_signal": "up, down 또는 flat", "reason": "종목별 근거", "assessment_status": "assessed 또는 held", "direction_bias": "up/down/neutral/unknown", "bias_confidence": "low/mid/high/unknown", "bias_reason": "상승/하락 근거를 비교한 이유 또는 판단 불가 사유"}
   ]
 }
 watch_stocks는 [오늘의 관심 종목] 목록에 있는 종목을 **그 이름 그대로, 전부, 그 순서로** 넣으세요 (직접 고르지 마세요).
 core_stocks는 삼성전자/SK하이닉스 고정입니다. 종목별 directional_signal은 up/down/flat 중 하나이며,
-그 종목만의 근거(가격 흐름, 뉴스, 업종과 미국 지표의 관계)가 없으면 flat(보합)으로 두세요.
+근거가 부족하면 assessment_status=held로 두세요. flat은 작은 변동을 예상할 근거가 있을 때만 사용합니다.
 reason에는 그 종목에 대한 근거만 적고, 시장 전체 이야기를 반복하지 마세요."""
 
 TRADER_SYSTEM_PROMPT += """
 추가 출력(기존 JSON 필드를 유지):
-- 각 종목에 direction_bias: up/down/neutral/unknown, bias_confidence: low/mid/high/unknown을 넣으세요.
+- 모든 종목에 assessment_status(assessed/held), bias_reason(종목별 상하방 근거 비교), direction_bias: up/down/neutral/unknown, bias_confidence: low/mid/high/unknown을 넣으세요.
   flat은 예상 변동 폭이 작은 것이고 direction_bias는 그 안의 기울기입니다. 근거가 없으면 unknown이며,
   시장 방향이나 현재 시세만 보고 과거 예측의 기울기를 지어내지 마세요. reason에 종목 근거를 설명하세요.
 - 장기투자는 별도 장기팀이 판단합니다. 여기에서는 단기 판단만 수행하고 long_term_plan을 만들지 마세요.
@@ -113,7 +113,8 @@ recommended_confidence={risk_assessment.get('recommended_confidence')}
     result = normalize_prediction(result)
     if watch_names:
         result = align_watch_stocks(result, watch_names)
-    return result
+    from rules.stock_judgment import validate_stocks
+    return validate_stocks(result)
 
 
 def align_watch_stocks(result: dict, watch_names: list[str]) -> dict:
@@ -121,15 +122,17 @@ def align_watch_stocks(result: dict, watch_names: list[str]) -> dict:
     by_name = {str(s.get("name", "")).strip(): s for s in (result.get("watch_stocks") or []) if isinstance(s, dict)}
     aligned = []
     for n in watch_names:
-        s = dict(by_name.get(n) or {"name": n, "directional_signal": "flat", "reason": "트레이더가 이 종목을 다루지 않아 보합 처리"})
+        s = dict(by_name.get(n) or {"name": n, "directional_signal": "flat", "reason": "트레이더가 이 종목을 다루지 않아 판단 보류"})
         s["name"] = n
         if s.get("directional_signal") not in ("up", "down", "flat"):
             s["directional_signal"] = "flat"
+            s["assessment_status"] = "held"
         aligned.append(s)
     result["watch_stocks"] = aligned
     for s in result.get("core_stocks") or []:
         if isinstance(s, dict) and s.get("directional_signal") not in ("up", "down", "flat"):
             s["directional_signal"] = "flat"
+            s["assessment_status"] = "held"
     return result
 
 

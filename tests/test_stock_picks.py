@@ -21,7 +21,7 @@ def test_align_forces_todays_list_and_flat_default():
     out = align_watch_stocks(r, ["현대차", "기아", "NAVER"])
     assert [s["name"] for s in out["watch_stocks"]] == ["현대차", "기아", "NAVER"]
     assert out["watch_stocks"][1]["directional_signal"] == "flat"
-    assert out["watch_stocks"][2]["directional_signal"] == "flat" and "보합 처리" in out["watch_stocks"][2]["reason"]
+    assert out["watch_stocks"][2]["directional_signal"] == "flat" and "판단 보류" in out["watch_stocks"][2]["reason"]
 
 
 def test_apply_reviews_only_keep_or_flat():
