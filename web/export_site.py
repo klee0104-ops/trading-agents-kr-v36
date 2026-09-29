@@ -240,6 +240,8 @@ def build_snapshot_data() -> dict:
         data[key] = _redact_deep(data[key], cores)
     from memory.research_reports import sync_latest
     from data.sessions import kst_now
+    from tools.company_research import read_public as company_public
+    data['company_research']=company_public(Config.COMPANY_RESEARCH_PATH,Config.LONG_RESEARCH_PATH)
     data['research_reports']=sync_latest(Config.REPORT_ARCHIVE_PATH,Config.LAST_OUTCOME_PATH,Config.LONG_RESEARCH_PATH,kst_now())
     return data
 
@@ -439,6 +441,8 @@ section>*,.hero-card>*,#pred>*,#ret>*,#paper>*,.panel>*{min-width:0}
 .long-research{--long-accent:#62dfb1;--long-soft:#1da87512;display:grid;gap:12px}.long-research>.audit-note{border:1px solid #39c99666;border-left:5px solid #39c996;border-radius:20px;padding:24px;background:linear-gradient(125deg,#1da8751c,transparent)}.long-research>.audit-note>b{font-size:20px;color:var(--long-accent)}.long-research h3{color:var(--long-accent);font-size:20px;border-left:3px solid #39c996;padding-left:12px;margin:26px 0 4px}.long-research .watch-item{border-radius:18px;border-color:#39c99640;background:var(--long-soft);padding:20px}.long-research .watch-item>b{font-size:17px}.long-research .watch-item small{line-height:1.9}.long-research .tbl{border-radius:16px;overflow:hidden}.long-research th{background:var(--long-soft)}
 :root[data-theme="light"] .long-research{--long-accent:#08764f;--long-soft:#eaf7f1}.long-research p{line-height:1.8}
 @media(max-width:600px){.paper-total{padding:18px!important}.paper-total .pnl{font-size:18px}.long-research>.audit-note{padding:18px}.paper-sleeve{padding:18px}}
+
+.company-search-link{border:1px solid var(--line,var(--border));border-radius:12px!important;background:var(--panel-2,var(--surface-2))}.company-search-box{display:flex;gap:12px;align-items:center;border:1px solid var(--line,var(--border));background:var(--panel-2,var(--surface-2));padding:16px 20px;border-radius:18px}.company-search-box input{font:inherit;background:transparent;color:inherit;border:0;outline:0;width:100%;font-size:18px}.company-search-box:focus-within{outline:2px solid var(--accent)}.company-results{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0}.company-results button,#runCompany{font:inherit;text-align:left;border:1px solid var(--line,var(--border));border-radius:14px;padding:16px;cursor:pointer;background:var(--panel-2,var(--surface-2));color:inherit}.company-results small{display:block;color:var(--muted,var(--text-muted));margin-top:6px}.company-results button:hover{border-color:var(--accent)}#runCompany{background:var(--accent);color:white}#runCompany:disabled{opacity:.5;cursor:wait}.company-report{padding:24px;border:1px solid var(--line,var(--border));border-radius:20px;margin:20px 0;line-height:1.85}.company-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.company-metrics>div{background:var(--panel-2,var(--surface-2));padding:14px;border-radius:12px}.company-metrics small,.company-metrics b{display:block}.company-report small{font-weight:400;color:var(--muted,var(--text-muted))}@media(max-width:600px){.company-report{padding:16px}.company-results{grid-template-columns:1fr 1fr}}
 
 /* Desktop navigation and readable green chart palette. */
 :root{--chart-price:#38e6a0;--chart-ma20:#b9f56b;--chart-ma60:#53d6cb}
@@ -787,6 +791,26 @@ _JS = r"""
     ' 포지션 = (2p−1)×½켈리×목표변동성15%/실현변동성, |2p−1|<0.1이면 현금. 왕복 비용 0.1% 차감. 표본 '+rb.days+'일.</div>'
     : '<div class="empty">검증된 기록이 쌓이면 수익률(롱=KODEX200 · 쇼트=KODEX인버스 · 현금)이 표시됩니다.</div>';
 
+function companyReportView(r,esc){
+ if(!r)return '<p class="empty">아직 저장된 심층분석이 없습니다. 내 PC 대시보드에서 분석을 실행하면 이곳에서 볼 수 있습니다.</p>';
+ var labels={reviewed:'검토 완료',held:'판단 보류',failed:'분석 실패'};
+ var metrics={price:'가격',ttm_income:'최근 12개월 순이익',ttm_fcf:'최근 12개월 잉여현금흐름',revenue_yoy_pct:'매출 전년 대비 (%)',debt_equity:'부채/자본',pb:'PBR',ttm_eps:'최근 12개월 EPS'};
+ return '<article class="company-report"><p class="ev">기업 조사 · '+esc(r.generated_at)+' · '+esc(labels[r.status]||'확인 필요')+'</p><h2>'+esc(r.name)+' <small>'+esc(r.code)+'</small></h2><p>'+esc(r.note)+'</p><p class="ev">모의계좌와 독립된 조사 보고서 · 자동 매매 지시가 아닙니다.</p><h3>재무·가치평가 자료</h3>'+(r.candidates||[]).map(function(c){return '<p>결산기 '+esc(c.period_end||'미확인')+' · '+esc(c.source||'자료 없음')+'</p><div class="company-metrics">'+Object.keys(metrics).map(function(k){var v=(c.metrics||{})[k];return '<div><small>'+metrics[k]+'</small><b>'+(typeof v==='number'&&isFinite(v)?v.toLocaleString(undefined,{maximumFractionDigits:2}):'자료 없음')+'</b></div>';}).join('')+'</div><p class="ev">부족한 자료: '+esc((c.missing||[]).join(', ')||'보고된 누락 없음')+'</p>';}).join('')+'<h3>분석가와 반대 검토</h3>'+((r.roles||[]).map(function(role){return '<section><h4>'+esc(role.name)+'</h4>'+(role.stocks||[]).map(function(s){return '<p>'+esc(({consider:'검토 가능',watch:'관찰',reject:'반대'})[s.stance]||s.stance)+'</p><ul>'+(s.points||[]).map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul><b>판단을 다시 검토할 조건</b><ul>'+(s.invalidation||[]).map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul>';}).join('')+'<p>'+esc((role.summary||[]).join(' '))+'</p></section>';}).join('')||'<p>자료·검증 요건을 충족하지 못해 AI 검토를 완료하지 못했습니다.</p>')+'<h3>근거 출처</h3><ul>'+(r.sources||[]).map(function(s){return '<li>'+esc(s.id)+' · '+esc(s.source)+' · '+esc(s.date)+'</li>';}).join('')+'</ul><p class="ev">뉴스 '+Number(r.news_count||0)+'건 · '+esc(r.news_status||'확인 불가')+' · 집계 재무자료와 뉴스 제목 기반 조사이며 공시 원문 전체 검증이 아닙니다. 재무 금액 단위는 원자료 기준입니다.</p></article>';
+}
+function mountCompanySearch(data,esc,run){
+ var input=document.getElementById('companyQuery'),list=document.getElementById('companyResults'),body=document.getElementById('companyBody');
+ if(!input||!list||!body)return;
+ var selected=null,busy=false;
+ function render(){var q=input.value.trim().toLowerCase();var rows=(data.companies||[]).filter(function(c){return !q||c.name.toLowerCase().includes(q)||c.code.includes(q);}).slice(0,12);
+ list.innerHTML=rows.map(function(c){var saved=(data.reports||[]).some(function(r){return r.code===c.code;});return '<button type="button" data-company-code="'+esc(c.code)+'"><b>'+esc(c.name)+'</b><small>'+esc(c.code)+' · '+(saved?'보고서 있음':'미분석')+'</small></button>';}).join('')||'<p>지원 목록에서 찾지 못했습니다. 현재 코스피 시총 상위 100개 관리 기업을 지원합니다.</p>';
+ list.querySelectorAll('[data-company-code]').forEach(function(b){b.addEventListener('click',function(){selected=b.getAttribute('data-company-code');show();});});}
+ function show(){var records=(data.reports||[]).filter(function(r){return r.code===selected;}).reverse();var c=(data.companies||[]).find(function(c){return c.code===selected;});
+ body.innerHTML='<h3>'+esc(c?c.name:selected)+'</h3>'+(run?'<p class="ev">내 PC 전용 · 하루 1건, 최대 3회 모델 호출 · 실패해도 당일 실행 한도는 유지됩니다. 실행 시 API 비용이 발생할 수 있습니다.</p><button type="button" id="runCompany" '+(busy?'disabled':'')+'>'+(busy?'분석 중…':'이 기업 새 심층분석 실행')+'</button>':'<p class="ev">공개 페이지에서는 저장된 보고서만 볼 수 있습니다.</p>')+companyReportView(records[0],esc)+(records.length>1?'<details><summary>이전 조사 '+(records.length-1)+'건</summary>'+records.slice(1).map(function(r){return companyReportView(r,esc);}).join('')+'</details>':'');
+ if(run)body.querySelector('#runCompany').addEventListener('click',async function(){if(busy)return;busy=true;var code=selected;show();try{var r=await run(code);data.reports=(data.reports||[]).concat([r]);}catch(e){body.insertAdjacentHTML('beforeend','<p role="alert">'+esc(e.message||'분석 실패')+'</p>');busy=false;body.querySelector('#runCompany').disabled=false;body.querySelector('#runCompany').textContent='이 기업 새 심층분석 실행';return;}busy=false;show();});
+ }
+ input.addEventListener('input',render);render();
+}
+
 function paperProfit(v,percent){
  if(typeof v!=='number'||!isFinite(v))return '<span class="pnl-neutral">미확인</span>';
  var rounded=Number(v.toFixed(percent?3:0));
@@ -877,6 +901,7 @@ function splitPaperView(s, esc) {
   return executionAlignmentView(s.execution_alignment,esc)+total+'<p class="ev">전체 투자 노출 '+won(s.gross_exposure)+' · 상승/하락 상쇄 후 방향 노출 '+won(s.net_direction_exposure)+(s.hedged?' · 장기 상승 자산과 단기 인버스가 일부 상쇄됩니다.':'')+'</p>'+books+((s.recent_trades||[]).length?trades:'<p>아직 체결 없음 · 유효한 판단과 당일 시세를 기다립니다.</p>')+'<p class="ev">장기: 독립 장기팀의 종목 계획으로 월 1회 조정, 미승인·만료·뉴스 재검토 시 추가 매수 보류. 단기: KOSPI200·ETF 별도 판단, 종목별 근거 검증 후 최대 25%. 아침 진입/15:20 청산, 자료 장애 시 실제 체결은 지연될 수 있습니다. 단기 일손실 2% 현금화, 최고 평가액 대비 장기 15%/단기 10% 손실 시 중지. 장중 5분 점검이므로 손실 한도를 넘겨 체결될 수 있습니다. 관측 시세에 편도 거래비용 0.015%·슬리피지 0.05%를 가정하며 실제 호가·체결을 재현하지 않습니다. 개별주식 매도에는 세금 0.2%를 추가로 가정하며 실제 적용 세율과 다를 수 있습니다. 현금 이자·배당·ETF 분배금은 미반영입니다.</p>';
 }
 
+  if(typeof document.createElement==='function')mountCompanySearch(D.company_research||{},esc,null);
   if($('reportLibrary')) $('reportLibrary').innerHTML=reportLibraryView(D.research_reports,esc);
   if($('longResearch')) $('longResearch').innerHTML=longResearchView(D.long_research,esc);
   var PA=D.paper||null;
@@ -996,6 +1021,7 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
       <a href="#reports" data-tab="reports"><i>▤</i><span class="l">팀 보고서</span><span class="s">보고서</span></a>
       <a href="#long" data-tab="long"><i>長</i><span class="l">장기 투자</span><span class="s">장기</span></a>
       <a href="#paper" data-tab="paper"><i>₩</i><span class="l">모의투자 수익률</span><span class="s">모의투자</span></a>
+      <a href="#company" data-tab="company" class="company-search-link"><i>⌕</i><span class="l">기업 심층분석 검색</span><span class="s">검색</span></a>
       <a href="#records" data-tab="records"><i>≡</i><span class="l">예측 기록</span><span class="s">기록</span></a>
     </nav>
     <span class="mono clk" id="clock">--:--:-- KST</span>
@@ -1051,6 +1077,7 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
   <div class="panel" id="tab-paper">
     <section><h2>모의투자 수익률 <span class="h2-sub">가상자본금 2,000만원 · 장기 800만원 / 단기·현금 1,200만원 · 조회 시점 가격으로 모의 체결</span></h2><div id="paper" style="display:grid;gap:14px"></div></section>
   </div>
+  <div class="panel" id="tab-company"><section><h2>기업 심층분석</h2><p class="ev">기업명 또는 종목코드로 검색하세요. 현재 관리 중인 코스피 시가총액 상위 100개 기업을 지원합니다.</p><label class="company-search-box"><span aria-hidden="true">⌕</span><input id="companyQuery" type="search" maxlength="80" placeholder="기업명 또는 종목코드 검색" aria-label="기업명 또는 종목코드 검색"></label><div id="companyResults" class="company-results"></div><div id="companyBody"><p>기업을 선택하면 저장된 심층분석을 볼 수 있습니다.</p></div></section></div>
   <div class="panel" id="tab-records">
     <section><h2>정식 예측 기록</h2><div id="records"></div></section>
     <section><h2>관찰 복기 · 별도 보관 예측</h2><p class="ev">관찰일과 원래 예측 대상일이 다른 기록은 정식 적중률·가상계좌 수익에 합산하지 않습니다.</p><div id="reviewHistory"></div></section>

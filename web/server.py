@@ -419,6 +419,29 @@ def run_pipeline():
         _RUN_LOCK.release()
 
 
+
+@app.route("/api/company-research", methods=["GET"])
+def company_research_library():
+    from tools.company_research import read_public
+    return jsonify(read_public(Config.COMPANY_RESEARCH_PATH,Config.LONG_RESEARCH_PATH))
+
+@app.route("/api/company-research/run", methods=["POST"])
+def company_research_run():
+    from tools.company_research import run
+    from data.sessions import kst_now
+    code=request.get_json().get('code')
+    if not isinstance(code,str) or not re.fullmatch(r'[0-9A-Z]{6}',code):
+        return jsonify({'error':'지원 목록에서 기업을 선택하세요.'}),400
+    if not _has_real_api_key():return jsonify({'error':'내 PC에 분석 API 키를 먼저 등록하세요.'}),400
+    if not _RUN_LOCK.acquire(blocking=False):return jsonify({'error':'다른 분석이 실행 중입니다.'}),429
+    try:
+        return jsonify(run(Path(Config.COMPANY_RESEARCH_PATH),Config.LONG_RESEARCH_PATH,code,kst_now(),_real_llm))
+    except ValueError as e:
+        return jsonify({'error':str(e)}),400
+    except Exception:
+        return jsonify({'error':'조사 실행 실패 또는 이미 실행 중입니다. 잠시 후 보고서를 확인하세요.'}),503
+    finally:_RUN_LOCK.release()
+
 if __name__ == "__main__":
     print(f"TradingAgents-KR 대시보드: http://127.0.0.1:{Config.WEB_PORT}"
           + ("  [보기 전용 모드: 분석 실행/수집 비활성화]" if Config.WEB_READONLY else ""))

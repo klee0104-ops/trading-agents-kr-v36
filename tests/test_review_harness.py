@@ -20,7 +20,8 @@ def test_dashboard_contract():
     page.feed((ROOT / 'web/static/index.html').read_text(encoding='utf-8'))
     assert '/app.js' in page.scripts
     assert len(page.ids) == len(set(page.ids))
-    assert len(page.tabs) == 9
+    assert len(page.tabs) == 10
+    assert "company" in page.tabs
     assert "long" in page.tabs and "reports" in page.tabs
     assert all('tab-' + tab in page.ids for tab in page.tabs)
     js = (ROOT / 'web/static/app.js').read_text(encoding='utf-8')

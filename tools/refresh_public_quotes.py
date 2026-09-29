@@ -107,6 +107,8 @@ def run(root=ROOT):
     from execution.split_portfolio import read_summary
     from config import Config
     from memory.long_report import read_public
+    from tools.company_research import read_public as company_public
+    updated['company_research']=company_public(Config.COMPANY_RESEARCH_PATH,Config.LONG_RESEARCH_PATH)
     updated['long_research'] = read_public(Config.LONG_RESEARCH_PATH)
     from memory.research_reports import sync_latest
     updated['research_reports']=sync_latest(Config.REPORT_ARCHIVE_PATH,Config.LAST_OUTCOME_PATH,Config.LONG_RESEARCH_PATH,now)

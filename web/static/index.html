@@ -20,6 +20,7 @@
       <a href="#reports" data-tab="reports">팀 보고서</a>
       <a href="#long" data-tab="long">장기 투자</a>
       <a href="#paper" data-tab="paper">가상 계좌</a>
+      <a href="#company" data-tab="company" class="company-search-link">⌕ 기업 심층분석 검색</a>
       <a href="#backtest" data-tab="backtest">백테스트</a>
       <a href="#data" data-tab="data">데이터·이벤트</a>
     </nav>
@@ -82,6 +83,7 @@
 <div id="eventChart" class="chart-wrap"></div><div id="newsPanel" class="news-panel"></div>
 <div class="collect-form"><label>종목명 <input id="collectName" maxlength="40" placeholder="삼성전자"></label><label>시작일 <input id="collectStart" type="date"></label><label>종료일 <input id="collectEnd" type="date"></label><label>임계값(%) <input id="collectThreshold" type="number" min="0.5" max="30" step="0.5" value="3"></label><button id="btnCollect" class="btn">수집 시작</button></div>
 </div></section>
+<section class="tab-panel" id="tab-company"><section><h2>기업 심층분석</h2><p class="ev">기업명 또는 종목코드로 검색하세요. 현재 관리 중인 코스피 시가총액 상위 100개 기업을 지원합니다.</p><label class="company-search-box"><span aria-hidden="true">⌕</span><input id="companyQuery" type="search" maxlength="80" placeholder="기업명 또는 종목코드 검색" aria-label="기업명 또는 종목코드 검색"></label><div id="companyResults" class="company-results"></div><div id="companyBody"><p>기업을 선택하면 저장된 심층분석을 볼 수 있습니다.</p></div></section></section>
 <noscript>대시보드를 사용하려면 JavaScript를 활성화하세요.</noscript>
 <footer>모의투자·참고용 정보입니다. 분석 대상 거래일과 데이터 기준일을 확인하세요.</footer>
 </main><script src="/app.js" defer></script></body></html>

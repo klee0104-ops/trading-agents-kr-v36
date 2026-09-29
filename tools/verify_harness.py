@@ -18,7 +18,7 @@ def main():
     temp_root.mkdir(mode=0o755)
     for key, filename in {'MEMORY_DB_PATH':'memory.json', 'LESSONS_PATH':'lessons.json',
                           'PAPER_ACCOUNT_PATH':'paper.json', 'PAPER_PORTFOLIO_PATH':'portfolio.json', 'LONG_RESEARCH_PATH':'long_research.json', 'LAST_OUTCOME_PATH':'outcome.json',
-                          'REPORT_ARCHIVE_PATH':'research_reports.json', 'EVENT_ARCHIVE_DB_PATH':'events.db'}.items():
+                          'COMPANY_RESEARCH_PATH':'company_research.json', 'REPORT_ARCHIVE_PATH':'research_reports.json', 'EVENT_ARCHIVE_DB_PATH':'events.db'}.items():
         env[key] = str(temp_root / filename)
     commands = [[node, '--check', 'web/static/app.js'],
                 [node, 'tests/frontend_harness.cjs'],

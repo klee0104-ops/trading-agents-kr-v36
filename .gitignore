@@ -57,3 +57,7 @@ long_research.pending
 research_reports.json
 research_reports.json.lock
 research_reports.pending
+
+company_research.json
+company_research.json.lock
+company_research.pending

@@ -1,3 +1,23 @@
+function companyReportView(r,esc){
+ if(!r)return '<p class="empty">아직 저장된 심층분석이 없습니다. 내 PC 대시보드에서 분석을 실행하면 이곳에서 볼 수 있습니다.</p>';
+ var labels={reviewed:'검토 완료',held:'판단 보류',failed:'분석 실패'};
+ var metrics={price:'가격',ttm_income:'최근 12개월 순이익',ttm_fcf:'최근 12개월 잉여현금흐름',revenue_yoy_pct:'매출 전년 대비 (%)',debt_equity:'부채/자본',pb:'PBR',ttm_eps:'최근 12개월 EPS'};
+ return '<article class="company-report"><p class="ev">기업 조사 · '+esc(r.generated_at)+' · '+esc(labels[r.status]||'확인 필요')+'</p><h2>'+esc(r.name)+' <small>'+esc(r.code)+'</small></h2><p>'+esc(r.note)+'</p><p class="ev">모의계좌와 독립된 조사 보고서 · 자동 매매 지시가 아닙니다.</p><h3>재무·가치평가 자료</h3>'+(r.candidates||[]).map(function(c){return '<p>결산기 '+esc(c.period_end||'미확인')+' · '+esc(c.source||'자료 없음')+'</p><div class="company-metrics">'+Object.keys(metrics).map(function(k){var v=(c.metrics||{})[k];return '<div><small>'+metrics[k]+'</small><b>'+(typeof v==='number'&&isFinite(v)?v.toLocaleString(undefined,{maximumFractionDigits:2}):'자료 없음')+'</b></div>';}).join('')+'</div><p class="ev">부족한 자료: '+esc((c.missing||[]).join(', ')||'보고된 누락 없음')+'</p>';}).join('')+'<h3>분석가와 반대 검토</h3>'+((r.roles||[]).map(function(role){return '<section><h4>'+esc(role.name)+'</h4>'+(role.stocks||[]).map(function(s){return '<p>'+esc(({consider:'검토 가능',watch:'관찰',reject:'반대'})[s.stance]||s.stance)+'</p><ul>'+(s.points||[]).map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul><b>판단을 다시 검토할 조건</b><ul>'+(s.invalidation||[]).map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul>';}).join('')+'<p>'+esc((role.summary||[]).join(' '))+'</p></section>';}).join('')||'<p>자료·검증 요건을 충족하지 못해 AI 검토를 완료하지 못했습니다.</p>')+'<h3>근거 출처</h3><ul>'+(r.sources||[]).map(function(s){return '<li>'+esc(s.id)+' · '+esc(s.source)+' · '+esc(s.date)+'</li>';}).join('')+'</ul><p class="ev">뉴스 '+Number(r.news_count||0)+'건 · '+esc(r.news_status||'확인 불가')+' · 집계 재무자료와 뉴스 제목 기반 조사이며 공시 원문 전체 검증이 아닙니다. 재무 금액 단위는 원자료 기준입니다.</p></article>';
+}
+function mountCompanySearch(data,esc,run){
+ var input=document.getElementById('companyQuery'),list=document.getElementById('companyResults'),body=document.getElementById('companyBody');
+ if(!input||!list||!body)return;
+ var selected=null,busy=false;
+ function render(){var q=input.value.trim().toLowerCase();var rows=(data.companies||[]).filter(function(c){return !q||c.name.toLowerCase().includes(q)||c.code.includes(q);}).slice(0,12);
+ list.innerHTML=rows.map(function(c){var saved=(data.reports||[]).some(function(r){return r.code===c.code;});return '<button type="button" data-company-code="'+esc(c.code)+'"><b>'+esc(c.name)+'</b><small>'+esc(c.code)+' · '+(saved?'보고서 있음':'미분석')+'</small></button>';}).join('')||'<p>지원 목록에서 찾지 못했습니다. 현재 코스피 시총 상위 100개 관리 기업을 지원합니다.</p>';
+ list.querySelectorAll('[data-company-code]').forEach(function(b){b.addEventListener('click',function(){selected=b.getAttribute('data-company-code');show();});});}
+ function show(){var records=(data.reports||[]).filter(function(r){return r.code===selected;}).reverse();var c=(data.companies||[]).find(function(c){return c.code===selected;});
+ body.innerHTML='<h3>'+esc(c?c.name:selected)+'</h3>'+(run?'<p class="ev">내 PC 전용 · 하루 1건, 최대 3회 모델 호출 · 실패해도 당일 실행 한도는 유지됩니다. 실행 시 API 비용이 발생할 수 있습니다.</p><button type="button" id="runCompany" '+(busy?'disabled':'')+'>'+(busy?'분석 중…':'이 기업 새 심층분석 실행')+'</button>':'<p class="ev">공개 페이지에서는 저장된 보고서만 볼 수 있습니다.</p>')+companyReportView(records[0],esc)+(records.length>1?'<details><summary>이전 조사 '+(records.length-1)+'건</summary>'+records.slice(1).map(function(r){return companyReportView(r,esc);}).join('')+'</details>':'');
+ if(run)body.querySelector('#runCompany').addEventListener('click',async function(){if(busy)return;busy=true;var code=selected;show();try{var r=await run(code);data.reports=(data.reports||[]).concat([r]);}catch(e){body.insertAdjacentHTML('beforeend','<p role="alert">'+esc(e.message||'분석 실패')+'</p>');busy=false;body.querySelector('#runCompany').disabled=false;body.querySelector('#runCompany').textContent='이 기업 새 심층분석 실행';return;}busy=false;show();});
+ }
+ input.addEventListener('input',render);render();
+}
+
 function paperProfit(v,percent){
  if(typeof v!=='number'||!isFinite(v))return '<span class="pnl-neutral">미확인</span>';
  var rounded=Number(v.toFixed(percent?3:0));
@@ -1143,7 +1163,7 @@ function initTabs() {
   window.addEventListener("hashchange", () => activateTab((location.hash || "").replace("#", "")));
 }
 
-document.addEventListener("DOMContentLoaded", () => { initTheme(); initTabs(); init(); loadReports(); setInterval(loadReports,300000); loadLongResearch(); setInterval(loadLongResearch,300000); loadKospi(); loadMarket(); loadPaper(); setInterval(loadPaper,300000); setInterval(loadMarket, 600000);
+document.addEventListener("DOMContentLoaded", () => { initTheme(); initTabs(); init(); loadCompanySearch(); loadReports(); setInterval(loadReports,300000); loadLongResearch(); setInterval(loadLongResearch,300000); loadKospi(); loadMarket(); loadPaper(); setInterval(loadPaper,300000); setInterval(loadMarket, 600000);
   tickClock(); setInterval(tickClock, 1000); loadLive(); scheduleLive();
   document.addEventListener("visibilitychange", () => { if (!document.hidden) loadLive(); }); });
 
@@ -1160,3 +1180,9 @@ function renderReviewHistory(audit = {}) {
 async function loadLongResearch(){const box=document.getElementById('longResearch');if(!box)return;try{const r=await fetch('/api/long-research',{credentials:'same-origin'});if(!r.ok)throw new Error('unavailable');box.innerHTML=longResearchView(await r.json(),escapeHtml);}catch(_){box.textContent='장기 보고서 조회 실패 · 새로고침 후 확인하세요.';}}
 
 async function loadReports(){const box=document.getElementById("reportLibrary");if(!box)return;try{const r=await fetch("/api/reports",{credentials:"same-origin"});if(!r.ok)throw new Error("unavailable");box.innerHTML=reportLibraryView(await r.json(),escapeHtml);}catch(_){box.textContent="보고서 조회 실패 · 다음 갱신 때 다시 확인합니다.";}}
+
+async function loadCompanySearch(){
+ try{const data=await fetchJSON('/api/company-research');mountCompanySearch(data,escapeHtml,async code=>{
+ const r=await fetchJSON('/api/company-research/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});return r;
+ });}catch(_){const b=document.getElementById('companyBody');if(b)b.textContent='기업 목록 조회 실패 · 새로고침해 주세요.';}
+}
