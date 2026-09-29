@@ -42,6 +42,16 @@ def refresh_stock_quotes(data, now, root):
                  'change_pct': round((r['close']/r['prev_close']-1)*100, 4),
                  'traded_at': traded, 'source': '네이버 증권',
                  'intraday': day == now.date() and market_status(now)['code'] in ('open', 'closing')}
+            history = {}
+            for item in rows:
+                try:
+                    d = date.fromisoformat(item['date'])
+                    v = item['close']
+                    if d <= day and type(v) in (int, float) and math.isfinite(v) and v > 0:
+                        history[d.isoformat()] = v
+                except (ValueError, TypeError, KeyError):
+                    continue
+            q['history'] = [{'date': d, 'close': history[d]} for d in sorted(history)[-10:]]
             q['checked_at'] = old.get('checked_at') if all(old.get(k)==v for k,v in q.items()) else now.isoformat(timespec='seconds')
             return name, q
         except Exception:

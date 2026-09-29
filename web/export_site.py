@@ -418,6 +418,21 @@ section>*,.hero-card>*,#pred>*,#ret>*,#paper>*,.panel>*{min-width:0}
   .label{margin-top:4px}
 }
 
+/* Compact overview and progressively disclosed stock research. */
+.stocks{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px}
+.stock-tile{font:inherit;text-align:left;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:22px;padding:22px;cursor:pointer;display:grid;gap:9px;min-width:0;transition:transform .15s,border-color .15s}
+.stock-tile:hover{transform:translateY(-3px);border-color:var(--accent)}
+.stock-tile:focus-visible,.stock-dialog button:focus-visible{outline:3px solid var(--accent);outline-offset:4px}
+.stock-top{display:flex;align-items:center;gap:12px}.stock-top strong{display:block;font-size:18px}.stock-top small,.stock-bottom small{display:block;color:var(--muted);font-size:12px;margin-top:4px}
+.stock-avatar{width:42px;height:42px;border-radius:15px;display:grid;place-items:center;background:var(--panel-2);color:var(--accent);font-weight:800}.stock-arrow{margin-left:auto;color:var(--muted);font-size:28px}
+.stock-price{font-size:30px;font-weight:750;letter-spacing:-1px;font-variant-numeric:tabular-nums}.stock-tile .stock-line{height:74px;width:100%}.stock-bottom{border-top:1px solid var(--line);padding-top:12px;font-size:13px}
+.stock-dialog{box-sizing:border-box;width:min(680px,calc(100% - 32px));max-height:90dvh;overflow-y:auto;border:1px solid var(--line);border-radius:26px;background:var(--panel);color:var(--ink);padding:30px;box-shadow:0 24px 100px #0006}.stock-dialog::backdrop{background:#10182899;backdrop-filter:blur(5px)}
+.stock-detail-head{display:flex;justify-content:space-between;gap:12px;align-items:center}.stock-detail-head h2{margin:8px 0 22px;font-size:28px}.stock-detail-head small{color:var(--muted)}
+.stock-dialog button{font:inherit;cursor:pointer;border:0;border-radius:12px;background:var(--panel-2);color:var(--ink);padding:10px 16px;min-height:44px}.stock-dialog .detail-close{font-size:26px}.stock-period{display:flex;gap:8px;margin:22px 0 10px}.stock-period button[aria-pressed=true]{background:var(--accent);color:white}.stock-dialog .stock-line{width:100%;display:block}.stock-dates{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--muted)}.stock-prices{margin:18px 0}.stock-prices summary{cursor:pointer;padding:12px 0}.stock-dialog .stock{background:var(--panel-2);border:0;padding:18px}.stock-dialog h3{margin-top:28px}
+.panel>section{border-radius:22px}.tabs a{border-radius:12px}.kpi{border-radius:18px}
+@media(max-width:600px){.stocks{grid-template-columns:1fr}.stock-tile{padding:20px}.stock-dialog{width:100%;max-height:92dvh;margin:auto 0 0;border-radius:24px 24px 0 0;padding:24px 20px}.stock-price{font-size:28px}}
+@media(prefers-reduced-motion:reduce){.stock-tile{transition:none}.stock-tile:hover{transform:none}}
+
 /* Desktop navigation and readable green chart palette. */
 :root{--chart-price:#38e6a0;--chart-ma20:#b9f56b;--chart-ma60:#53d6cb}
 :root[data-theme="light"]{--chart-price:#087c50;--chart-ma20:#547d12;--chart-ma60:#087f89}
@@ -658,6 +673,33 @@ _JS = r"""
   $('watch').innerHTML=((D.watch_stocks||[]).map(card).join('')||'<div class="empty">없음</div>')+
     (D.stock_moderation?'<div class="ev" style="grid-column:1/-1">관심 종목은 KOSPI 시총 100 중 무작위 추첨. 종목 중재자가 '+D.stock_moderation.reviewed+'종목을 검토해 '+D.stock_moderation.adjusted_to_flat+'종목을 보합으로 조정했습니다.</div>':'');
 
+  (function(){
+  if(typeof document.createElement!=='function')return;
+  var stockItems=(D.core_stocks||[]).concat(D.watch_stocks||[]);
+  function stockHistory(q){return (q&&q.history||[]).filter(function(r){return /^\d{4}-\d{2}-\d{2}$/.test(r.date)&&typeof r.close==='number'&&isFinite(r.close)&&r.close>0;});}
+  function stockLine(rows,small){
+    if(rows.length<2)return '<p class="ev">가격 흐름 자료를 기다리고 있어요</p>';
+    var values=rows.map(function(r){return r.close;}),lo=Math.min.apply(null,values),hi=Math.max.apply(null,values),pad=Math.max((hi-lo)*.15,hi*.001),bottom=lo-pad,range=hi-lo+2*pad;
+    var pts=rows.map(function(r,i){return [20+i*560/(rows.length-1),160-(r.close-bottom)/range*140];});
+    var path=pts.map(function(p){return p.join(',');}).join(' ');
+    return '<svg class="stock-line" viewBox="0 0 600 180" role="img" aria-label="'+esc(rows[0].date+'부터 '+rows[rows.length-1].date+'까지 가격 흐름')+'"><path d="M20 160H580" stroke="currentColor" opacity=".15"/><polyline points="'+path+'" fill="none" stroke="var(--chart-price)" stroke-width="'+(small?5:3)+'" stroke-linecap="round" stroke-linejoin="round"/>'+(small?'':pts.map(function(p,i){return '<circle cx="'+p[0]+'" cy="'+p[1]+'" r="4" fill="var(--chart-price)"><title>'+esc(rows[i].date+' · '+fv(rows[i].close)+'원')+'</title></circle>';}).join(''))+'</svg>';
+  }
+  function simpleStock(s){var q=(D.stock_quotes||{})[s.name]||{},idx=stockItems.indexOf(s);
+    return '<button type="button" class="stock-tile" data-stock-open="'+idx+'" aria-label="'+esc(s.name)+' 주가와 분석 상세 보기"><span class="stock-top"><span class="stock-avatar">'+esc(s.name.slice(0,1))+'</span><span><strong>'+esc(s.name)+'</strong><small>'+esc(q.code||'종목코드 확인 중')+'</small></span><span class="stock-arrow">›</span></span><span class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</span><span class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct):'—')+' <small>전일 대비</small></span>'+stockLine(stockHistory(q),true)+'<span class="stock-bottom">AI '+(s.directional_signal==='up'?'상승 예상':s.directional_signal==='down'?'하락 예상':'보합 예상')+'<small>'+(q.status==='unavailable'?'갱신 실패 · 이전 자료':esc(q.date||'자료 대기'))+'</small></span></button>';
+  }
+  $('core').innerHTML=(D.core_stocks||[]).map(simpleStock).join('')||'<p class="empty">추천 종목을 기다리고 있어요</p>';
+  $('watch').innerHTML=(D.watch_stocks||[]).map(simpleStock).join('')||'<p class="empty">관심 종목을 기다리고 있어요</p>';
+  var detail=document.createElement('dialog');detail.className='stock-dialog';detail.setAttribute('aria-labelledby','stockDetailTitle');document.body.appendChild(detail);
+  var stockTrigger=null;
+  function showStock(index){var s=stockItems[index];if(!s)return;var q=(D.stock_quotes||{})[s.name]||{},rows=stockHistory(q);
+    detail.innerHTML='<div class="stock-detail-head"><div><small>종목 살펴보기 · '+esc(q.code||'코드 미확인')+'</small><h2 id="stockDetailTitle">'+esc(s.name)+'</h2></div><button type="button" class="detail-close" aria-label="종목 상세 닫기">×</button></div><div class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</div><p class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct)+' · 전일 대비':'현재 시세 없음')+'</p><div class="stock-period"><button type="button" data-period="5">최근 5일</button><button type="button" data-period="10" aria-pressed="true">최근 10일</button></div><div id="stockChartArea"></div><p class="ev">일별 종가 흐름 · 오늘 장중에는 마지막 값이 변동됩니다. '+esc(q.source||'출처 대기')+' · 수집 '+esc(q.checked_at||'미확인')+'</p><details class="stock-prices"><summary>날짜별 가격 보기</summary><div id="stockPriceRows"></div></details><h3>AI는 이렇게 판단했어요</h3>'+card(s)+'<p class="ev">예측은 매수 지시가 아닙니다. 이 화면에서는 주문이나 AI 분석을 실행하지 않습니다.</p>';
+    function draw(count){var r=rows.slice(-count);detail.querySelector('#stockChartArea').innerHTML=stockLine(r,false)+(r.length?'<p class="stock-dates"><span>'+esc(r[0].date)+'</span><span>'+esc(r[r.length-1].date)+' · '+r.length+'개 관측값</span></p>':'');detail.querySelector('#stockPriceRows').innerHTML=r.map(function(x){return '<p class="stock-dates"><span>'+esc(x.date)+'</span><b>'+fv(x.close)+'원</b></p>';}).join('')||'자료 없음';detail.querySelectorAll('[data-period]').forEach(function(b){b.setAttribute('aria-pressed',String(Number(b.dataset.period)===count));});}
+    draw(10);detail.querySelectorAll('[data-period]').forEach(function(b){b.addEventListener('click',function(){draw(Number(b.dataset.period));});});detail.querySelector('.detail-close').addEventListener('click',function(){detail.close();});detail.showModal();
+  }
+  document.querySelectorAll('[data-stock-open]').forEach(function(b){b.addEventListener('click',function(){stockTrigger=b;showStock(Number(b.dataset.stockOpen));});});
+  detail.addEventListener('close',function(){if(stockTrigger)stockTrigger.focus();});
+
+  })();
   var inp=D.inputs||{};
   function irow(x){return '<tr><td>'+esc(x.name)+'</td><td class="num">'+(x.value!=null?esc(x.value):'—')+'</td><td class="num '+(x.change_pct>=0?'up':'down')+'">'+(x.change_pct>=0?'+':'')+Number(x.change_pct).toFixed(2)+'%</td></tr>';}
   var fl=inp.kr_flow;
@@ -960,7 +1002,7 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
   </div>
   <div class="panel" id="tab-stocks">
     <section><h2>추천 종목 <span class="h2-sub">삼성전자 · SK하이닉스</span></h2><p class="ev">AI 분석 대상으로 선정된 종목입니다. 상승·하락·보합 예측을 모두 포함하며, 매수 지시가 아닙니다. 현재 등락은 전일 종가 대비이며 장중 비교는 확정 적중률에 반영하지 않습니다.</p><div class="stocks" id="core"></div>
-      <h2 style="margin-top:20px">관심 종목 <span class="h2-sub">KOSPI 시총 100에서 오늘 추첨한 10개</span></h2><div class="stocks" id="watch"></div></section>
+      <h2 style="margin-top:20px">관심 종목 <span class="h2-sub">종목을 눌러 주가 흐름과 판단 근거 보기</span></h2><div class="stocks" id="watch"></div></section>
   </div>
   <div class="panel" id="tab-process">
     <div class="grid">
