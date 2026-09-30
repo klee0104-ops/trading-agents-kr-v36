@@ -11,7 +11,7 @@ def load(path):
 def decision(state,now):
     report=state.get('report') or {};news=state.get('news') or {}
     universe={**UNIVERSE,**(state.get('catalog') or {}).get('instruments',{})}
-    blocked=set();reasons=[]
+    blocked=set();reasons=[];block_by_code={}
     try:
         age=now-datetime.fromisoformat(news['checked_at'])
         if news.get('status')!='ok' or not timedelta(0)<=age<=timedelta(hours=2):
@@ -23,7 +23,11 @@ def decision(state,now):
     reviewed=set(report.get('reviewed_news_ids',[])) if report.get('status')=='approved' else set()
     for n in state.get('alerts',[]):
         if n['id'] not in reviewed:
-            blocked.update(r['code'] for r in n['relations'] if r['code'] in universe)
+            for relation in n.get('relations',[]):
+                code=relation.get('code')
+                if code in universe:
+                    blocked.add(code)
+                    block_by_code.setdefault(code,[]).append('중요 뉴스 재검토 대기')
     if blocked and not reasons: reasons.append('중요 뉴스 재검토 대기')
     try:
         valid=(report.get('status')=='approved' and datetime.fromisoformat(report['generated_at'])<=now<=datetime.fromisoformat(report['valid_until']))
@@ -36,7 +40,51 @@ def decision(state,now):
         if not current:valid=False;reasons.append('후보군 정보 갱신 필요')
     return {'reviewed_codes':[f['code'] for f in report.get('fundamentals',[])],'instruments':{c:{'name':u['name'],'sector':u.get('sector','Unknown')} for c,u in universe.items()},'status':'approved' if valid else 'held','generated_at':report.get('generated_at'),
             'valid_until':report.get('valid_until'),'allocations':report.get('allocations',[]) if valid else [],
-            'blocked_codes':sorted(blocked),'block_reasons':reasons,'horizon_days':report.get('horizon_days',180)}
+            'blocked_codes':sorted(blocked),'block_reasons':reasons,
+            'block_by_code':{code:list(dict.fromkeys(items)) for code,items in block_by_code.items()},
+            'horizon_days':report.get('horizon_days',180)}
+
+
+def candidate_gate(f,report,gate):
+    """Explain the current policy without turning an incomplete report into approval."""
+    from data.long_research import finite
+    code=f.get('code');m=f.get('metrics') or {}
+    checks=[('최근 4분기 순이익',m.get('ttm_income'),'> 0'),
+            ('최근 4분기 잉여현금흐름',m.get('ttm_fcf'),'> 0'),
+            ('최근 4분기 EPS',m.get('ttm_eps'),'> 0'),
+            ('매출 전년동기 대비',m.get('revenue_yoy_pct'),'>= 0%'),
+            ('부채/자본',m.get('debt_equity'),'0~1'),
+            ('PER',m.get('pe'),'0~20'),('PBR',m.get('pb'),'0~3')]
+    predicates=[lambda x:x>0,lambda x:x>0,lambda x:x>0,lambda x:x>=0,
+                lambda x:0<=x<=1,lambda x:0<x<=20,lambda x:0<x<=3]
+    details=[{'label':label,'value':value if finite(value) else None,'required':required,
+              'result':'unknown' if not finite(value) else 'pass' if predicate(value) else 'fail'}
+             for (label,value,required),predicate in zip(checks,predicates)]
+    missing=list(f.get('missing') or [])
+    sector_gap=f.get('sector') in ('Financial Services','Unknown') and missing==['업종별 추가 자료 검증 필요 · 자동 매수 제외']
+    if f.get('status') not in ('ok','insufficient') or (missing and not sector_gap) or any(c['result']=='unknown' for c in details):
+        phase='data_wait';reason='필수 재무자료 확인 대기'
+    elif f.get('sector') in ('Financial Services','Unknown'):
+        phase='sector_review';reason='업종별 추가 검증 대기'
+    elif any(c['result']=='fail' for c in details[:5]):
+        phase='fundamental_fail';reason='수익성·성장·부채 기준 미충족'
+    elif any(c['result']=='fail' for c in details[5:]):
+        phase='valuation_wait';reason='현재 가치평가 기준 초과 · 가격 또는 재무 변화 재검토'
+    elif gate['status']!='approved':
+        phase='report_wait';reason='장기팀 보고서 승인 또는 갱신 대기'
+    else:
+        allocation=next((a for a in gate['allocations'] if a.get('code')==code and a.get('weight',0)>0),None)
+        if allocation is None:
+            phase='thesis_wait';reason='장기팀의 종목별 매수 배분 없음'
+        elif code in gate['blocked_codes']:
+            phase='news_wait';reason=' / '.join(gate.get('block_by_code',{}).get(code) or gate.get('block_reasons') or ['뉴스 수집 상태 확인 대기'])
+        elif finite(m.get('price')) and m['price']>allocation['buy_below']:
+            phase='price_wait';reason='매수 기준가 도달 대기'
+        else:
+            phase='eligible';reason='보고서·가격 기준 충족 (현재 시세는 모의 주문 시 재확인)'
+    return {'phase':phase,'reason':reason,'criteria':details,
+            'next_review':'재무자료는 다음 수집 때 확인, 장기팀 모델은 마지막 검토 후 7일 이내 재호출하지 않음',
+            'buy_below':next((a['buy_below'] for a in gate['allocations'] if a.get('code')==code and a.get('weight',0)>0),None)}
 
 def public_summary(state,now):
     from rules.citations import sanitize_external
@@ -56,7 +104,8 @@ def public_summary(state,now):
         candidates.append({'code':code,'name':universe[code]['name'],'status':f.get('status'),
                            'eligible':f.get('eligible',False),'period_end':f.get('period_end'),
                            'collected_at':f.get('collected_at'),'metrics':f.get('metrics',{}),
-                           'missing':f.get('missing',[]),'source':f.get('source','자료 미확보')})
+                           'missing':f.get('missing',[]),'source':f.get('source','자료 미확보'),
+                           'gate':candidate_gate(f,report,gate)})
     roles=[]
     for r in report.get('roles',[]):
         rows=[{'name':universe.get(s['code'],{'name':s['code']})['name'],'stance':s['stance'],
@@ -74,9 +123,13 @@ def public_summary(state,now):
            'rows':[{k:s.get(k) for k in ('code','name','sector','status','score','reasons','missing','rank','period_end','metrics','source')} for s in catalog.get('screens',[]) if s['code'] in catalog.get('watchlist',[])],
            'screen_counts':{key:sum(s.get('status')==key for s in catalog.get('screens',[])) for key in ('research','watch','needs_data')},
            'batch':catalog.get('batch',[]),'next_batch':catalog.get('next_batch',[]),'changes':catalog.get('changes',[])[-8:]}
+    note=report.get('note','장기팀 조사 대기')
+    if report.get('status')=='approved' and not gate['allocations']:
+        note='장기 조사 완료 · 승인된 종목별 매수 배분 없음 (각 종목의 자료·가치평가 조건 확인)'
     return {'deferred':[{'name':clean(f['name']),'missing':[clean(m) for m in f.get('missing',[])]} for f in report.get('deferred',[])],'watchlist':watch,'status':gate['status'],'generated_at':report.get('generated_at'),'valid_until':report.get('valid_until'),
-            'note':clean(report.get('note','장기팀 조사 대기')),'candidates':candidates,'roles':roles,
+            'note':clean(note),'candidates':candidates,'roles':roles,
             'allocations':gate['allocations'],'blocked_codes':gate['blocked_codes'],'block_reasons':gate['block_reasons'],
+            'block_by_code':gate['block_by_code'],
             'news_status':news.get('status','waiting'),'news_checked_at':news.get('checked_at'),
             'news_count':len(news.get('events',[])),'events':events,'calls':report.get('calls',0)}
 

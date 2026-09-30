@@ -131,6 +131,54 @@ def test_missing_eps_keeps_research_data_but_forbids_buy():
     report=run_team(m,f,news(),NOW)
     assert report['status']=='approved' and report['allocations']==[] and len(report['roles'])==3
 
+
+def test_public_gate_distinguishes_missing_fundamentals_and_price():
+    from memory.long_report import candidate_gate
+    gate={'status':'approved','allocations':[{'code':'005930','weight':.2,'buy_below':38}], 'blocked_codes':[]}
+    f=facts()[0]
+    assert candidate_gate(f,{},gate)['phase']=='price_wait'
+    f['metrics']['price']=37
+    assert candidate_gate(f,{},gate)['phase']=='eligible'
+    f['metrics']['ttm_eps']=None;f['metrics']['pe']=None;f['missing']=['EPS missing']
+    assert candidate_gate(f,{},gate)['phase']=='data_wait'
+    f=facts()[0];f['metrics']['pe']=25;f['eligible']=False
+    assert candidate_gate(f,{},gate)['phase']=='valuation_wait'
+
+
+def test_one_stock_news_and_price_wait_do_not_block_other_allocation():
+    report={'status':'approved','generated_at':NOW.isoformat(),
+            'valid_until':(NOW+timedelta(days=8)).isoformat(),'horizon_days':180,
+            'reviewed_codes':list(UNIVERSE),'blocked_codes':['000660'],
+            'instruments':{'005930':{'name':'삼성전자','sector':'A'},
+                           '000660':{'name':'SK하이닉스','sector':'B'}},
+            'allocations':[{'code':'005930','weight':.2,'buy_below':38},
+                           {'code':'000660','weight':.2,'buy_below':38}]}
+    d=tick(fresh(NOW),None,quotes(),NOW,long_report=report)
+    assert [(t['ticker'],t['side']) for t in d['trades']]==[('005930','buy')]
+    later=NOW+timedelta(minutes=5)
+    report['blocked_codes']=[]
+    e=tick(d,None,quotes(later),later,long_report=report)
+    assert [(t['ticker'],t['side']) for t in e['trades']]==[('005930','buy'),('000660','buy')]
+    assert e['sleeves']['long']['holdings']['005930']['qty']==d['sleeves']['long']['holdings']['005930']['qty']
+    repeat=tick(e,None,quotes(later+timedelta(minutes=5)),later+timedelta(minutes=5),long_report=report)
+    assert len(repeat['trades'])==2
+
+
+def test_price_wait_is_per_stock_and_keeps_month_open():
+    report={'status':'approved','generated_at':NOW.isoformat(),
+            'valid_until':(NOW+timedelta(days=8)).isoformat(),'horizon_days':180,
+            'reviewed_codes':list(UNIVERSE),'blocked_codes':[],
+            'instruments':{'005930':{'name':'삼성전자','sector':'A'},
+                           '000660':{'name':'SK하이닉스','sector':'B'}},
+            'allocations':[{'code':'005930','weight':.2,'buy_below':38},
+                           {'code':'000660','weight':.2,'buy_below':38}]}
+    q=quotes();q['000660']['value']=39
+    d=tick(fresh(NOW),None,q,NOW,long_report=report)
+    assert [t['ticker'] for t in d['trades']]==['005930']
+    later=NOW+timedelta(minutes=5)
+    e=tick(d,None,quotes(later),later,long_report=report)
+    assert [t['ticker'] for t in e['trades']]==['005930','000660']
+
 def test_long_renderer_and_security_contract():
     import shutil,subprocess
     from web.export_site import _JS,render_fragment

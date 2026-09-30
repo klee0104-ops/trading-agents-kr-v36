@@ -38,7 +38,8 @@ def cycle(path,portfolio_path,now,client_factory=None,expanded=False,short_names
     write(path,state)
     model_at=state.get('last_model_review_at')
     due=not model_at or now-datetime.fromisoformat(model_at)>=timedelta(days=7)
-    if due and state.get('fundamentals_checked_day')!=str(now.date()):
+    data_gap=any(f.get('status') in ('insufficient','unavailable') for f in state.get('fundamentals',[]))
+    if (due or data_gap) and state.get('fundamentals_checked_day')!=str(now.date()):
         state['fundamentals']=collect_fundamentals(now,universe) if expanded else collect_fundamentals(now);state['fundamentals_checked_day']=str(now.date());write(path,state)
     if due:
         facts=state.get('fundamentals',[])

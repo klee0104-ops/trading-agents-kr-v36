@@ -55,7 +55,7 @@ def mark(book, prices):
     book['peak'] = max(book['peak'],book['equity'])
 
 
-def rebalance(book, target_code, weight, prices, now, journal, sleeve, reason, targets=None, names=None):
+def rebalance(book, target_code, weight, prices, now, journal, sleeve, reason, targets=None, names=None, preserve_codes=()):
     """Sell before buying; average cost includes entry fees, exits realize net P/L."""
     names=names or NAMES
     equity=book['equity']
@@ -65,6 +65,9 @@ def rebalance(book, target_code, weight, prices, now, journal, sleeve, reason, t
     if targets is not None:
         for code,weight in targets.items():
             desired[code]=int(equity*weight/(prices[code]*(1+SLIPPAGE)*(1+FEE)))
+    for code in preserve_codes:
+        if code in book['holdings']:
+            desired[code]=book['holdings'][code]['qty']
     for side in ('sell','buy'):
         for code in prices:
             h=book['holdings'].get(code,{'qty':0,'cost':0.})
@@ -182,14 +185,40 @@ def tick(state, envelope, quotes, now, long_report=None):
                 except (KeyError,TypeError,ValueError):valid=False
                 if not valid:
                     book['status']='장기 보고서 미승인/만료 · 추가 매수 보류';continue
-                if long_report.get('blocked_codes'):
-                    book['status']='미국 뉴스 재검토/수집 상태 확인 필요 · 추가 매수 보류';continue
-                if book['decision_key']==month:
-                    book['status']='장기팀 월간 목표 유지 · 뉴스 위험 감시';continue
-                if any(a['weight']>0 and prices[a['code']]>a['buy_below'] for a in allocations):
-                    book['status']='장기 매수 기준가 도달 대기 · 추격/자동 물타기 금지';continue
-                rebalance(book,None,0,prices,now,d['trades'],key,'독립 장기팀 승인 · 월간 분할 계좌 조정',targets=targets,names=names)
-                book['decision_key']=month;book['status']='독립 장기팀 계획 반영 완료';continue
+                positive=[a for a in allocations if a['weight']>0]
+                if not positive:
+                    book['status']='승인된 종목별 매수 배분 없음 · 현금/기존 보유 유지';continue
+                ledger=book.get('long_execution') or {}
+                if ledger.get('month')!=month:
+                    # Preserve a month already processed by the old engine on upgrade.
+                    old_done=book.get('decision_key')==month
+                    ledger={'month':month,'filled_codes':[a['code'] for a in positive] if old_done else []}
+                filled=set(ledger['filled_codes'])
+                blocked=set(long_report.get('blocked_codes') or [])
+                ready=[a for a in positive if a['code'] not in filled and a['code'] not in blocked
+                       and prices[a['code']]<=a['buy_below']]
+                if not ready:
+                    book['long_execution']=ledger
+                    if all(a['code'] in filled for a in positive):
+                        book['status']='장기팀 월간 목표 유지 · 보유 평가'
+                    elif all(a['code'] in blocked for a in positive if a['code'] not in filled):
+                        book['status']='승인 종목의 뉴스 재검토/수집 상태 확인 필요 · 추가 매수 보류'
+                    else:
+                        book['status']='장기 매수 기준가 도달 대기 · 종목별 확인'
+                    continue
+                preserve=set(book['holdings']) & (filled|blocked|{a['code'] for a in positive if a not in ready})
+                preserved_value=sum(book['holdings'][c]['qty']*prices[c] for c in preserve)
+                if preserved_value+sum(a['weight']*book['equity'] for a in ready) > book['equity']*.5+1:
+                    book['status']='장기 총 비중 50% 한도 대기';continue
+                before=len(d['trades'])
+                rebalance(book,None,0,prices,now,d['trades'],key,'독립 장기팀 승인 · 종목별 월간 모의 배분',
+                          targets={a['code']:a['weight'] for a in ready},names=names,preserve_codes=preserve)
+                bought={t['ticker'] for t in d['trades'][before:] if t['side']=='buy' and t['sleeve']==key}
+                ledger['filled_codes']=sorted(filled|bought)
+                book['long_execution']=ledger
+                if bought: book['decision_key']=month
+                book['status']='장기팀 종목별 계획 반영 완료' if bought else '현금 또는 주문 가능 수량 부족 · 추가 매수 대기'
+                continue
             if book['decision_key']==month:
                 book['status']='월간 장기 목표 유지 · 보유 평가'; continue
             plan=((signal or {}).get('final_result') or {}).get('long_term_plan') or {}
