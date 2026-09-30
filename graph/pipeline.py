@@ -592,6 +592,29 @@ class TradingAgentsPipeline:
                 day -= _td(days=1)
         else:
             day = _date.fromisoformat(on) if on else now.date()
+        existing = next((r for r in self.lessons.all() if r.get('target_date') == str(day)), None)
+        verified = self.memory.get(str(day))
+        # The close-time verification runs before this optional observation.
+        # Recover a formal review from its attached record if an older run
+        # replaced the lesson with an observational one; never spend another
+        # model call or downgrade the formal review.
+        if verified and verified.get('verified') and verified.get('postmortem'):
+            if existing is None or existing.get('observational'):
+                self.lessons.add({
+                    'target_date': str(day), 'direction': verified.get('direction'),
+                    'actual_direction': verified.get('actual_direction'),
+                    'correct': verified.get('correct'),
+                    'strategy_return_pct': verified.get('strategy_return_pct'),
+                    'tags': verified.get('situation_tags') or [],
+                    **verified['postmortem'],
+                })
+                print(f'[정식 복기 복구] {day}: 검증된 예측 기록에서 교훈을 복원했습니다.')
+            else:
+                print(f'[관찰 복기 생략] {day}: 정식 복기가 이미 있습니다.')
+            return None
+        if existing:
+            print(f'[관찰 복기 생략] {day}: 복기가 이미 있습니다.')
+            return None
         recs = self.memory.all_records() + self.memory.superseded_records()
         pick = next((r for r in recs if r.get("target_date") == str(day) and not r.get("verified")), None) \
             or next((r for r in sorted(recs, key=lambda r: r.get("run_at") or r.get("run_date") or "", reverse=True)
@@ -663,7 +686,8 @@ class TradingAgentsPipeline:
             return
         from agents.reviewer import run_postmortem, should_review
         rec = next((r for r in self.memory.all_records() if r.get("target_date") == target_date), None)
-        if not rec or not rec.get("outcome_digest") or not should_review(rec) or self.lessons.has(target_date):
+        prior = next((r for r in self.lessons.all() if r.get('target_date') == target_date), None)
+        if not rec or not rec.get("outcome_digest") or not should_review(rec) or (prior and not prior.get('observational')):
             return
         try:
             pm = run_postmortem(self.llm, rec, rec["outcome_digest"])

@@ -100,6 +100,46 @@ def test_review_now_observational_lesson(monkeypatch, tmp_path):
     assert pipe.lessons.all()[-1]["observational"] is True
 
 
+def test_close_review_restores_formal_lesson_without_another_model_call():
+    memory = MemoryStore(None)
+    memory._write({'2026-09-30': {
+        'target_date': '2026-09-30', 'verified': True, 'direction': 'up',
+        'actual_direction': 'down', 'correct': False, 'strategy_return_pct': -0.3,
+        'situation_tags': ['변동성:높음'], 'postmortem': {'lesson': '수급 악화 때 과신하지 않는다',
+                                                       'cause': '외국인 매도를 과소평가'},
+    }})
+    class NoCall:
+        def complete_json(self, *args, **kwargs):
+            raise AssertionError('Formal review already exists: no extra LLM call')
+    pipe = TradingAgentsPipeline(NoCall(), memory, data_provider=_P())
+    pipe.lessons.add({'target_date': '2026-09-30', 'observational': True,
+                      'lesson': '임시 관찰', 'tags': ['관찰']})
+    assert pipe.review_now('2026-09-30') is None
+    lesson = pipe.lessons.all()[0]
+    assert lesson['lesson'] == '수급 악화 때 과신하지 않는다'
+    assert lesson['tags'] == ['변동성:높음']
+    assert not lesson.get('observational')
+    assert pipe.review_now('2026-09-30') is None
+
+
+def test_verified_postmortem_replaces_earlier_intraday_observation():
+    memory = MemoryStore(None)
+    memory._write({'2026-09-30': {
+        'target_date': '2026-09-30', 'verified': True, 'direction': 'up',
+        'actual_direction': 'down', 'correct': False, 'strategy_return_pct': -0.3,
+        'outcome_digest': {'prediction': {'reasoning': ['합성 판단']}},
+        'situation_tags': ['변동성:높음'],
+    }})
+    pipe = TradingAgentsPipeline(MockLLMClient(), memory, data_provider=_P())
+    pipe.lessons.add({'target_date': '2026-09-30', 'observational': True,
+                      'lesson': '임시 관찰', 'tags': ['관찰']})
+    pipe._postmortem('2026-09-30')
+    lesson = pipe.lessons.all()[0]
+    assert lesson['lesson'] != '임시 관찰'
+    assert not lesson.get('observational')
+    assert memory.get('2026-09-30')['postmortem']
+
+
 def test_pending_today_only_after_close():
     m = MemoryStore(None)
     from datetime import date as _d
