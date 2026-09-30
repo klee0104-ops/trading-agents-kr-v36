@@ -158,9 +158,13 @@ def test_shared_page_masks_expired_intraday_profit():
     source="""const vm=require('node:vm'),assert=require('node:assert/strict');
 const nodes={},data=DATA;
 const document={getElementById(id){return nodes[id]||(nodes[id]={textContent:id==='ta-data'?JSON.stringify(data):'',innerHTML:''});}};
-const fixed=Date.parse('2026-09-29T14:12:00+09:00');
-class FakeDate extends Date {constructor(...args){super(...(args.length?args:[fixed]));}}
-vm.runInNewContext(SOURCE,{document,Date:FakeDate,Intl});
+let fixed=Date.parse('2026-09-29T14:05:00+09:00');
+class FakeDate extends Date {constructor(...args){super(...(args.length?args:[fixed]));} static now(){return fixed;}}
+const timers=[];
+vm.runInNewContext(SOURCE,{document,Date:FakeDate,Intl,setInterval:(fn,ms)=>timers.push({fn,ms})});
+assert.doesNotMatch(nodes.paper.innerHTML,/장중 시세 평가가 10분 이상 지연/);
+fixed=Date.parse('2026-09-29T14:12:00+09:00');
+for(const timer of timers.filter(x=>x.ms===60000))timer.fn();
 assert.match(nodes.paper.innerHTML,/장중 시세 평가가 10분 이상 지연/);
 assert.match(nodes.paper.innerHTML,/오늘 손익 <span class="pnl-neutral">미확인/);
 assert.match(nodes.paper.innerHTML,/누적 손익 <span class="pnl-neutral">미확인/);

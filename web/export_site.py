@@ -917,7 +917,10 @@ function splitPaperView(s, esc) {
   if($('longResearch')) $('longResearch').innerHTML=longResearchView(D.long_research,esc);
   var PA=D.paper||null;
   function won(v){return Number(v).toLocaleString(undefined,{maximumFractionDigits:0})+'원';}
-  if(PA&&PA.portfolio_mode){$('paper').innerHTML=splitPaperView(PA,esc);} else $('paper').innerHTML = PA ? (PA.days===0?'<div class="ev">운용 시작 전 · 수익률 0%는 초기 상태입니다. 아직 모의 체결·평가 기록이 없습니다.</div>':'')+'<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">'+
+  if(PA&&PA.portfolio_mode){
+    var paperHTML=splitPaperView(PA,esc);$('paper').innerHTML=paperHTML;
+    if(typeof setInterval==='function')setInterval(function(){var next=splitPaperView(PA,esc);if(next!==paperHTML){$('paper').innerHTML=next;paperHTML=next;}},60000);
+  } else $('paper').innerHTML = PA ? (PA.days===0?'<div class="ev">운용 시작 전 · 수익률 0%는 초기 상태입니다. 아직 모의 체결·평가 기록이 없습니다.</div>':'')+'<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">'+
     [['평가금액',won(PA.equity),pct(PA.total_return_pct)+' ('+(PA.pnl>=0?'+':'')+won(PA.pnl)+')',PA.total_return_pct>0?'up':PA.total_return_pct<0?'down':''],['시작 자금',won(PA.initial_cash),PA.days+'일 운용',''],['샤프 / MDD',(PA.sharpe_annual==null?'—':PA.sharpe_annual)+' / '+(PA.max_drawdown_pct==null?'—':PA.max_drawdown_pct+'%'),'승률 '+(PA.win_rate==null?'—':Math.round(PA.win_rate*100)+'%'),''],['거래',PA.trades+'건','비용 '+won(PA.fees),'']]
     .map(function(t){return '<div class="kpi"><div class="l">'+t[0]+'</div><div class="v mono '+t[3]+'" style="font-size:22px">'+t[1]+'</div><div class="d">'+t[2]+'</div></div>';}).join('')+'</div>'+
     curve([{n:'가상 계좌',v:(PA.equity_curve||[]).map(function(x){return (x.equity/PA.initial_cash-1)*100;}),c:'var(--accent)'}])+
