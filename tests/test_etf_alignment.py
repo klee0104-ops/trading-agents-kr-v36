@@ -28,13 +28,26 @@ def test_independent_instrument_direction_and_same_window_net_score():
  assert c['entry_at']!=c['exit_at']
  assert len(tick(d,envelope(),quotes(close+timedelta(minutes=5)),close+timedelta(minutes=5))['trades'])==2
 
-def test_legacy_is_not_rewritten_or_silently_sold_without_new_plan():
+def test_prior_day_legacy_holding_closes_at_current_quote_without_rewriting_entry():
  d=state();b=d['sleeves']['short'];b['holdings']={INVERSE:{'qty':10,'cost':1000}};b['cash']-=1000
- d['trades']=[{'at':'2026-09-29T15:15:29+09:00','ticker':INVERSE,'side':'buy','qty':10}]
+ d['trades']=[{'at':'2026-09-29T15:15:29+09:00','sleeve':'short','ticker':INVERSE,'side':'buy','qty':10}]
  old=deepcopy(d['trades'])
  out=tick(d,envelope({}),quotes(),NOW)
- assert out['trades']==old and out['sleeves']['short']['holdings'][INVERSE]['qty']==10
- assert '보류' in out['sleeves']['short']['status']
+ assert out['trades'][:1]==old and len(out['trades'])==2
+ assert out['trades'][-1]['at']==NOW.isoformat() and out['trades'][-1]['side']=='sell'
+ assert not out['sleeves']['short']['holdings'] and out['sleeves']['short']['realized_pnl']<0
+ assert out['legacy_trade_count']==2 and not out.get('short_cycles')
+
+def test_same_day_untracked_holding_waits_until_planned_exit():
+ d=state();b=d['sleeves']['short'];b['holdings']={INVERSE:{'qty':10,'cost':1000}};b['cash']-=1000
+ d['trades']=[{'at':'2026-09-30T15:15:00+09:00','sleeve':'short','ticker':INVERSE,'side':'buy','qty':10}]
+ before=NOW.replace(hour=15,minute=16)
+ held=tick(d,envelope({}),quotes(before),before)
+ assert len(held['trades'])==1 and INVERSE in held['sleeves']['short']['holdings']
+ due=NOW.replace(hour=15,minute=20)
+ sold=tick(held,envelope({}),quotes(due),due)
+ assert sold['trades'][-1]['at']==due.isoformat() and sold['trades'][-1]['side']=='sell'
+ assert not sold['sleeves']['short']['holdings']
 
 def test_late_entry_and_missing_benchmark_blocked():
  late=NOW.replace(hour=14)

@@ -40,10 +40,24 @@ def apply(state,book,signal,prices,quotes,now,names):
             rebalance(book,None,0,prices,now,state['trades'],'short','ETF 별도 운용 · 예정 청산 (시세 장애 시 다음 유효 시세)',names=names)
             close_cycle(state,book,quotes,now,'scheduled_exit');book['status']='ETF 운용 청산 완료 · 비용 차감 손익 기록';return
         book['status']='ETF 별도 판단으로 보유 중 · 실제 진입 이후 손익 평가';return
+    if book['holdings']:
+        # A legacy or untracked holding has no scored v2 cycle. Preserve its
+        # original entry, but never carry an intraday short ETF indefinitely.
+        held=set(book['holdings'])
+        same_day=all(any(t.get('sleeve')=='short' and t.get('ticker')==code and
+                             t.get('side')=='buy' and str(t.get('at',''))[:10]==today
+                             for t in state.get('trades',[])) for code in held)
+        if same_day and nowtime<time(15,20):
+            book['status']='기존 단기 보유 · 15:20 이후 첫 유효 시세 청산 대기';return
+        before=len(state['trades'])
+        rebalance(book,None,0,prices,now,state['trades'],'short',
+                  '기존 단기 보유 · 15:20 이후 첫 유효 시세 청산 (과거 체결 유지)',names=names)
+        state['legacy_trade_count']=state.get('legacy_trade_count',before)+len(state['trades'])-before
+        book['status']='기존 단기 보유 청산 완료 · 실제 시세와 비용 반영';return
     if state.get('short_v2_decision_day')==today:
         book['status']='ETF 당일 운용 완료/현금 계획 · 재진입 없음';return
     if not signal:
-        book['status']='ETF 별도 판단 미확보 · 기존 보유 유지/신규 매매 보류';return
+        book['status']='ETF 별도 판단 미확보 · 현금 유지/신규 매매 보류';return
     plan=(signal.get('final_result') or {}).get('etf_execution') or {}
     try:
         at=datetime.fromisoformat(plan['generated_at'])
@@ -56,7 +70,7 @@ def apply(state,book,signal,prices,quotes,now,names):
         if code:valid=valid and next(r['up_probability'] for r in rows if r['code']==code)>=60
     except (KeyError,TypeError,ValueError,StopIteration):valid=False
     if not valid:
-        book['status']='ETF 별도 판단 검증 미통과 · 기존 보유 유지/신규 매매 보류';return
+        book['status']='ETF 별도 판단 검증 미통과 · 현금 유지/신규 매매 보류';return
     if not time(9,0)<=nowtime<=time(9,15):
         book['status']='신규 진입 시간(09:00–09:15) 외 · 늦은 추격 진입 보류';return
     references=benchmark(quotes,now)

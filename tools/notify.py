@@ -36,17 +36,21 @@ def build_summary() -> tuple[str, str]:
     target = o.get("target_date", "")
     risk = (o.get("risk_assessment") or {}).get("risk_level", "")
     ver = o.get("verification") or {}
-    passed = "통과" if ver.get("verification_passed") else "주의"
+    qa = (o.get("final_qa") or {}).get("consistent")
+    validation = ("검증① 리스크 단계 " + ("통과" if ver.get("verification_passed") is True else "재판단")
+                  + " · 검증② 최종 QA " + ("정합" if qa is True else "불일치" if qa is False else "미검증"))
+    if qa is not True:
+        validation += " · 신규 모의 진입 보류"
 
     head = f"KOSPI {target} {direction}"
     if prob is not None:
         head += f" (상승확률 {float(prob):.0f}%)"
     if outlook:
         head += f" · {outlook}"
-    short = f"{head}\n신뢰도 {conf} · 리스크 {risk} · 검증 {passed}"
+    short = f"{head}\n신뢰도 {conf} · 리스크 {risk} · {validation}"
 
     lines = [f"[{TITLE}] {saved}", head,
-             f"신뢰도: {conf}   리스크: {risk}   검증: {passed}", ""]
+             f"신뢰도: {conf}   리스크: {risk}   {validation}", ""]
     for r in kp.get("reasoning", [])[:3]:
         lines.append(f" - {r}")
     stocks = fr.get("watch_stocks") or []
