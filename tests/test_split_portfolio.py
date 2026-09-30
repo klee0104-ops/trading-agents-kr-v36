@@ -147,3 +147,23 @@ assert.ok(!/NaN|undefined|null%/.test(nodes.paper.innerHTML));
 """.replace('DATA',json.dumps({'generated_at':NOW.isoformat(),'paper':summary(fresh(NOW))})).replace('SOURCE',json.dumps(_JS))
     r=subprocess.run([shutil.which('node'),'-'],input=source,text=True,encoding='utf-8',capture_output=True)
     assert r.returncode==0,r.stderr
+
+
+def test_shared_page_masks_expired_intraday_profit():
+    import shutil,subprocess
+    from web.export_site import _JS
+    d=tick(fresh(NOW),signal(),quotes(),NOW)
+    data={'generated_at':NOW.isoformat(),'paper':summary_at(d,NOW+timedelta(minutes=5))}
+    assert data['paper']['valuation_audit']['status']=='ok'
+    source="""const vm=require('node:vm'),assert=require('node:assert/strict');
+const nodes={},data=DATA;
+const document={getElementById(id){return nodes[id]||(nodes[id]={textContent:id==='ta-data'?JSON.stringify(data):'',innerHTML:''});}};
+const fixed=Date.parse('2026-09-29T14:12:00+09:00');
+class FakeDate extends Date {constructor(...args){super(...(args.length?args:[fixed]));}}
+vm.runInNewContext(SOURCE,{document,Date:FakeDate,Intl});
+assert.match(nodes.paper.innerHTML,/장중 시세 평가가 10분 이상 지연/);
+assert.match(nodes.paper.innerHTML,/오늘 손익 <span class="pnl-neutral">미확인/);
+assert.match(nodes.paper.innerHTML,/누적 손익 <span class="pnl-neutral">미확인/);
+""".replace('DATA',json.dumps(data)).replace('SOURCE',json.dumps(_JS))
+    r=subprocess.run([shutil.which('node'),'-'],input=source,text=True,encoding='utf-8',capture_output=True)
+    assert r.returncode==0,r.stderr
