@@ -83,10 +83,25 @@ def run_once(path,envelope):
         response=requests.get('https://m.stock.naver.com/api/index/KPI200/basic',headers={'User-Agent':'Mozilla/5.0'},timeout=10)
         response.raise_for_status();quotes['KPI200']=parse_quote(response.json(),kst_now())
     except Exception:pass  # Blocks new entry; does not block ETF risk exits.
-    updated=tick(state,envelope,quotes,kst_now(),long_report=plan)
-    if updated==state: return 'no_update'
-    write(path,updated)
-    return 'updated'
+    now=kst_now()
+    updated=tick(state,envelope,quotes,now,long_report=plan)
+    if updated!=state:
+        write(path,updated)
+    from execution.aggressive_shadow import fresh_shadow, valid_shadow
+    shadow_path=Path(Config.PAPER_AGGRESSIVE_PATH)
+    if shadow_path.resolve()==path.resolve():
+        raise ValueError('Aggressive ledger must be separate')
+    if shadow_path.exists():
+        shadow=json.loads(shadow_path.read_text(encoding='utf-8'))
+        if not valid_shadow(shadow):
+            raise ValueError('Invalid aggressive shadow ledger')
+    else:
+        short_equity=updated['sleeves']['short']['equity']
+        shadow=fresh_shadow(now,short_equity)
+    shadow_updated=tick(shadow,envelope,quotes,now,long_report=None)
+    if shadow_updated!=shadow or not shadow_path.exists():
+        write(shadow_path,shadow_updated)
+    return 'updated' if updated!=state or shadow_updated!=shadow else 'no_update'
 
 
 def main():

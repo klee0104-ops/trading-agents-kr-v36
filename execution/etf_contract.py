@@ -80,7 +80,11 @@ def apply(state,book,signal,prices,quotes,now,names):
          'selected_code':code,'entry_equity':book['equity'],'entry_fees':book['fees'],'reference_prices':references,
          'forecasts':[{k:r[k] for k in ('code','up_probability')} for r in rows],'status':'open',
          'transition_from_legacy':bool(book['holdings'])}
-    rebalance(book,code,weight,prices,now,state['trades'],'short','ETF 별도 판단 승인 · 아침 진입 · 15:20 청산 계획',names=names)
+    # The approved research plan remains capped at 25%. Only the isolated,
+    # validated paper experiment scales that same 25% order to 40%.
+    from execution.aggressive_shadow import MARKER, valid_shadow
+    execution_weight = .40 if code and weight == .25 and state.get('experiment') == MARKER and valid_shadow(state) else weight
+    rebalance(book,code,execution_weight,prices,now,state['trades'],'short','ETF 별도 판단 승인 · 아침 진입 · 15:20 청산 계획',names=names)
     state['short_v2_decision_day']=today
     book['decision_key']=today;book['status']='ETF 별도 운용 시작 · KOSPI 적중률과 별도 평가'
 

@@ -61,3 +61,7 @@ research_reports.pending
 company_research.json
 company_research.json.lock
 company_research.pending
+
+paper_aggressive.json
+paper_aggressive.json.lock
+paper_aggressive.pending

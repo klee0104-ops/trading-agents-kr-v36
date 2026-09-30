@@ -82,6 +82,7 @@ def _returns_public(rb) -> dict | None:
 _PAPER_FIELDS = ("execution_alignment", "days", "initial_cash", "equity", "pnl", "total_return_pct", "day_pnl", "day_return_pct", "valuation_audit", "sharpe_annual",
                  "max_drawdown_pct", "win_rate", "trades", "fees", "equity_curve", "recent_days",
                  "cash", "holdings", "recent_trades", "portfolio_mode", "sleeves", "last_tick", "created_at", "realized_pnl", "unrealized_pnl", "gross_exposure", "net_direction_exposure", "hedged")
+_COMPARISON_FIELDS = ("started_at", "last_tick", "status", "primary_weight_pct", "experiment_weight_pct", "primary_base_equity", "experiment_base_equity", "primary_period_pnl", "experiment_period_pnl", "primary_period_return_pct", "experiment_period_return_pct", "experiment_trades", "primary_total_trades")
 
 
 def _long_public():
@@ -100,6 +101,14 @@ def _paper_public() -> dict | None:
     except Exception:  # noqa: BLE001
         return None
     return _pick(sm, _PAPER_FIELDS)
+
+
+def _paper_comparison():
+    try:
+        from execution.aggressive_shadow import read_comparison
+        return read_comparison(Config.PAPER_PORTFOLIO_PATH, Config.PAPER_AGGRESSIVE_PATH)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _pick(d: dict, keys) -> dict:
@@ -176,6 +185,7 @@ def build_snapshot_data() -> dict:
         "returns": _returns_public(stats.get("returns")),
         "long_research": _long_public(),
         "paper": _paper_public(),  # User-authorized simulated returns and trades.
+        "paper_comparison": _paper_comparison(),
         "generated_at": datetime.now().isoformat(timespec="minutes"),
         "analysis_at": last.get("saved_at"),
         "prediction": {
@@ -912,10 +922,18 @@ function splitPaperView(s, esc) {
   return executionAlignmentView(s.execution_alignment,esc)+total+'<p class="ev">전체 투자 노출 '+won(s.gross_exposure)+' · 상승/하락 상쇄 후 방향 노출 '+won(s.net_direction_exposure)+(s.hedged?' · 장기 상승 자산과 단기 인버스가 일부 상쇄됩니다.':'')+'</p>'+books+((s.recent_trades||[]).length?trades:'<p>아직 체결 없음 · 유효한 판단과 당일 시세를 기다립니다.</p>')+'<p class="ev">장기: 독립 장기팀의 종목 계획으로 월 1회 조정, 미승인·만료·뉴스 재검토 시 추가 매수 보류. 단기: KOSPI200·ETF 별도 판단, 종목별 근거 검증 후 최대 25%. 아침 진입/15:20 청산, 자료 장애 시 실제 체결은 지연될 수 있습니다. 단기 일손실 2% 현금화, 최고 평가액 대비 장기 15%/단기 10% 손실 시 중지. 장중 5분 점검이므로 손실 한도를 넘겨 체결될 수 있습니다. 관측 시세에 편도 거래비용 0.015%·슬리피지 0.05%를 가정하며 실제 호가·체결을 재현하지 않습니다. 개별주식 매도에는 세금 0.2%를 추가로 가정하며 실제 적용 세율과 다를 수 있습니다. 현금 이자·배당·ETF 분배금은 미반영입니다.</p>';
 }
 
+function paperComparisonView(c, esc) {
+  if(!c)return '';
+  var won=function(v){return typeof v==='number'&&isFinite(v)?v.toLocaleString(undefined,{maximumFractionDigits:0})+'원':'미확인';};
+  var body=c.status==='ok'?'<p>기존 25%: '+paperProfit(c.primary_period_pnl,false)+' ('+paperProfit(c.primary_period_return_pct,true)+') · 공격형 40%: '+paperProfit(c.experiment_period_pnl,false)+' ('+paperProfit(c.experiment_period_return_pct,true)+')</p>':'<p>동일 시점 시세·원장 검증 전이라 수익률 비교를 보류합니다.</p>';
+  return '<div class="paper-sleeve"><h3>단기 비중 비교 · 별도 모의계좌</h3><p>두 방식 모두 단기 배정금 1,200만원을 기준으로 같은 승인 신호를 사용합니다. 공격형은 최대 40%만 매수합니다.</p>'+body+'<p class="ev">비교 시작 '+esc(c.started_at||'')+' · 기존 계좌 시작 평가액 '+won(c.primary_base_equity)+' · 과거 체결은 공격형에 복사하지 않음 · 공격형 체결 '+Number(c.experiment_trades||0)+'건 · 실제 투자 아님</p></div>';
+}
+
   if(typeof document.createElement==='function')mountCompanySearch(D.company_research||{},esc,null);
   if($('reportLibrary')) $('reportLibrary').innerHTML=reportLibraryView(D.research_reports,esc);
   if($('longResearch')) $('longResearch').innerHTML=longResearchView(D.long_research,esc);
   var PA=D.paper||null;
+  if($('paperCompare'))$('paperCompare').innerHTML=paperComparisonView(D.paper_comparison,esc);
   function won(v){return Number(v).toLocaleString(undefined,{maximumFractionDigits:0})+'원';}
   if(PA&&PA.portfolio_mode){
     var paperHTML=splitPaperView(PA,esc);$('paper').innerHTML=paperHTML;
@@ -1089,7 +1107,7 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
   <div class="panel" id="tab-reports"><section><h2>투자팀 리서치 라이브러리</h2><div id="reportLibrary"></div></section></div>
   <div class="panel" id="tab-long"><section><h2>장기 투자팀 보고서</h2><div id="longResearch" style="display:grid;gap:12px"></div></section></div>
   <div class="panel" id="tab-paper">
-    <section><h2>모의투자 수익률 <span class="h2-sub">가상자본금 2,000만원 · 장기 800만원 / 단기·현금 1,200만원 · 조회 시점 가격으로 모의 체결</span></h2><div id="paper" style="display:grid;gap:14px"></div></section>
+    <section><h2>모의투자 수익률 <span class="h2-sub">가상자본금 2,000만원 · 장기 800만원 / 단기·현금 1,200만원 · 조회 시점 가격으로 모의 체결</span></h2><div id="paper" style="display:grid;gap:14px"></div><div id="paperCompare" style="margin-top:14px"></div></section>
   </div>
   <div class="panel" id="tab-company"><section><h2>기업 심층분석</h2><p class="ev">기업명 또는 종목코드로 검색하세요. 현재 관리 중인 코스피 시가총액 상위 100개 기업을 지원합니다.</p><label class="company-search-box"><span aria-hidden="true">⌕</span><input id="companyQuery" type="search" maxlength="80" placeholder="기업명 또는 종목코드 검색" aria-label="기업명 또는 종목코드 검색"></label><div id="companyResults" class="company-results"></div><div id="companyBody"><p>기업을 선택하면 저장된 심층분석을 볼 수 있습니다.</p></div></section></div>
   <div class="panel" id="tab-records">
@@ -1130,7 +1148,8 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
 
 def render_fragment(data: dict) -> str:
     # Only the approved simulated-account fields may enter a shared report.
-    data = {**data, "paper": _pick(data.get("paper") or {}, _PAPER_FIELDS) or None}
+    data = {**data, "paper": _pick(data.get("paper") or {}, _PAPER_FIELDS) or None,
+            "paper_comparison": _pick(data.get("paper_comparison") or {}, _COMPARISON_FIELDS) or None}
     # </script> 탈출 방지: JSON 안의 '<'를 유니코드 이스케이프
     data_json = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
     out = _BODY.replace("{css}", _CSS).replace("{js}", _JS).replace("{data}", data_json)

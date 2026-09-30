@@ -309,6 +309,13 @@ def paper_account():
         return _safe_error(e)
 
 
+@app.route("/api/paper-comparison")
+def paper_comparison():
+    from execution.aggressive_shadow import read_comparison
+    try: return jsonify(read_comparison(Config.PAPER_PORTFOLIO_PATH, Config.PAPER_AGGRESSIVE_PATH))
+    except Exception as e: return _safe_error(e)
+
+
 @app.route("/api/backtest")
 def backtest_results():
     """저장형 백테스트 결과. backtest_results*.json 전부의 요약 + 선택한(기본: 최신) 파일의 일별 결과."""

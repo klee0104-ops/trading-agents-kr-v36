@@ -44,6 +44,7 @@ class Config:
     PAPER_ACCOUNT_PATH = os.environ.get("PAPER_ACCOUNT_PATH", "./paper_account.json")  # (V3.21) 가상 계좌
     PAPER_INITIAL_CASH = float(os.environ.get("PAPER_INITIAL_CASH", "10000000"))       # 시작 자금(원)
     PAPER_PORTFOLIO_PATH = os.environ.get("PAPER_PORTFOLIO_PATH", os.path.join(os.path.dirname(PAPER_ACCOUNT_PATH), "paper_portfolio.json"))
+    PAPER_AGGRESSIVE_PATH = os.environ.get("PAPER_AGGRESSIVE_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "paper_aggressive.json"))
     LONG_RESEARCH_PATH = os.environ.get("LONG_RESEARCH_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "long_research.json"))
     COMPANY_RESEARCH_PATH = os.environ.get("COMPANY_RESEARCH_PATH", os.path.join(os.path.dirname(LONG_RESEARCH_PATH), "company_research.json"))
     REPORT_ARCHIVE_PATH = os.environ.get("REPORT_ARCHIVE_PATH", os.path.join(os.path.dirname(LONG_RESEARCH_PATH), "research_reports.json"))

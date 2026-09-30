@@ -115,6 +115,8 @@ def run(root=ROOT):
     split = read_summary(Config.PAPER_PORTFOLIO_PATH)
     if split is not None:
         updated['paper'] = split
+    from execution.aggressive_shadow import read_comparison
+    updated['paper_comparison'] = read_comparison(Config.PAPER_PORTFOLIO_PATH, Config.PAPER_AGGRESSIVE_PATH)
     page = '<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"></head><body>'+render_fragment(updated)+'</body></html>'
     # Validate before replacing any file or making an external write.
     harden_report(page, secrets)

@@ -779,6 +779,19 @@ function renderLessons() {
 async function loadPaper() {
   const box = $("#paperBox");
   if (!box) return;
+  const comparisonBox = $("#paperCompare");
+  if (comparisonBox) {
+    try {
+      const response = await fetch("/api/paper-comparison", { credentials: "same-origin" });
+      const c = response.ok ? await response.json() : null;
+      if (c) {
+        const won = v => typeof v === "number" ? v.toLocaleString(undefined, {maximumFractionDigits:0}) + "원" : "미확인";
+        comparisonBox.innerHTML = '<div class="paper-sleeve"><h3>단기 비중 비교 · 별도 모의계좌</h3><p>같은 승인 신호를 단기 배정금 1,200만원에서 각각 최대 25%와 40%로 운용합니다.</p>' +
+          (c.status === "ok" ? '<p>기존 25%: ' + paperProfit(c.primary_period_pnl,false) + ' (' + paperProfit(c.primary_period_return_pct,true) + ') · 공격형 40%: ' + paperProfit(c.experiment_period_pnl,false) + ' (' + paperProfit(c.experiment_period_return_pct,true) + ')</p>' : '<p>동일 시점 시세·원장 검증 전이라 수익률 비교를 보류합니다.</p>') +
+          '<p class="ev">비교 시작 ' + escapeHtml(c.started_at || "") + ' · 기존 계좌 시작 평가액 ' + won(c.primary_base_equity) + ' · 과거 체결은 공격형에 복사하지 않음 · 공격형 체결 ' + Number(c.experiment_trades || 0) + '건 · 실제 투자 아님</p></div>';
+      } else comparisonBox.textContent = "";
+    } catch (_) { comparisonBox.textContent = ""; }
+  }
   let s = null;
   try { const r = await fetch("/api/paper", { credentials: "same-origin" }); if (r.ok) s = await r.json(); } catch (_) {}
   if(s?.portfolio_mode){box.className="";box.innerHTML=splitPaperView(s,escapeHtml);return;}
