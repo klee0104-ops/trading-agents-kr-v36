@@ -1,4 +1,4 @@
-"""Hourly all-session news; weekly bounded long team. No order APIs."""
+"""Hourly news; daily bounded candidate search until a buy plan exists."""
 from datetime import datetime, timedelta
 from pathlib import Path
 import argparse
@@ -37,11 +37,23 @@ def cycle(path,portfolio_path,now,client_factory=None,expanded=False,short_names
     state['alerts']=list(alerts.values())[-500:]
     write(path,state)
     model_at=state.get('last_model_review_at')
-    due=not model_at or now-datetime.fromisoformat(model_at)>=timedelta(days=7)
+    active_plan=any(a.get('weight',0)>0 for a in (state.get('report') or {}).get('allocations',[]))
+    # A positive, still-unfilled long plan is preserved for the weekly review.
+    # Without one, rotate at most one three-call research batch per KST day.
+    due=(not model_at or
+         (now-datetime.fromisoformat(model_at)>=timedelta(days=7) if active_plan
+          else now.date()>datetime.fromisoformat(model_at).date()))
+    due=due and state.get('last_candidate_attempt_day')!=str(now.date())
     data_gap=any(f.get('status') in ('insufficient','unavailable') for f in state.get('fundamentals',[]))
     if (due or data_gap) and state.get('fundamentals_checked_day')!=str(now.date()):
         state['fundamentals']=collect_fundamentals(now,universe) if expanded else collect_fundamentals(now);state['fundamentals_checked_day']=str(now.date());write(path,state)
     if due:
+        state['last_candidate_attempt_day']=str(now.date())
+        if expanded and state['catalog'].get('status')=='ok':
+            attempted=list(state['catalog'].get('next_batch',[]))
+            state['catalog']['attempted_batch']=attempted
+            state['catalog'].setdefault('review_history',{}).update({c:now.isoformat() for c in attempted})
+        write(path,state)
         facts=state.get('fundamentals',[])
         deferred=[]
         if expanded:
@@ -52,7 +64,7 @@ def cycle(path,portfolio_path,now,client_factory=None,expanded=False,short_names
         if expanded:ready=ready and state['catalog'].get('status')=='ok' and bool(universe)
         llm=None
         if ready and client_factory:
-            # Reserve the entire weekly attempt before constructing/calling the model.
+            # Reserve today's bounded attempt before constructing/calling the model.
             state['last_model_review_at']=now.isoformat()
             if expanded:
                 state['catalog']['batch']=list(universe)

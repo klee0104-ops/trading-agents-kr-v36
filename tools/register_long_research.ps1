@@ -8,5 +8,5 @@ $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -Repetiti
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Collect US-edition news hourly, all sessions. Weekly long-horizon review up to three model calls. No live orders.' -Force | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Hourly US news. Up to three daily candidate calls without an approved allocation; weekly with a plan. Paper only.' -Force | Out-Null
 Write-Output 'Registered: TradingAgents-KR LongResearch (60 minutes, current user logged in).'

@@ -110,6 +110,29 @@ def test_cycle_weekly_budget_daily_fundamentals_and_news_after_hours(tmp_path,mo
     assert len(m.calls)==3 and calls==['fundamentals']
     assert r['news']['checked_at']==(NOW+timedelta(hours=10)).isoformat()
 
+def test_candidate_search_daily_until_positive_plan_then_weekly(tmp_path,monkeypatch):
+    import data.long_research as data
+    from tools.long_research import cycle
+    monkeypatch.setattr(data,'collect_news',lambda now,held:{**news(),'checked_at':now.isoformat()})
+    monkeypatch.setattr(data,'collect_fundamentals',lambda now:facts())
+    p=tmp_path/'long.json';book=tmp_path/'portfolio.json'
+    models=[]
+    def no_plan():
+        m=Model();m.responses[-1]['allocations']=[];models.append(m);return m
+    a=cycle(p,book,NOW,no_plan)
+    assert a['report']['status']=='approved' and not a['report']['allocations']
+    cycle(p,book,NOW+timedelta(hours=2),no_plan)
+    assert len(models)==1 and len(models[0].calls)==3
+    b=cycle(p,book,NOW+timedelta(days=1),no_plan)
+    assert b['last_candidate_attempt_day']==str((NOW+timedelta(days=1)).date())
+    assert len(models)==2 and len(models[1].calls)==3
+    c=cycle(p,book,NOW+timedelta(days=2),lambda:Model())
+    assert c['report']['allocations'] and len(models)==2
+    cycle(p,book,NOW+timedelta(days=3),no_plan)
+    assert len(models)==2
+    cycle(p,book,NOW+timedelta(days=9),no_plan)
+    assert len(models)==3 and len(models[-1].calls)==3
+
 def test_reviewed_news_only_material_actually_given_to_models():
     events=[{'id':'event'+str(i),'title':'반도체 수요 동향','source':'Reuters','published_at':NOW.isoformat(),
              'relations':[{'name':'삼성전자'}]} for i in range(30)]
@@ -130,6 +153,17 @@ def test_missing_eps_keeps_research_data_but_forbids_buy():
     m=Model();m.responses[-1]['allocations']=[]
     report=run_team(m,f,news(),NOW)
     assert report['status']=='approved' and report['allocations']==[] and len(report['roles'])==3
+
+
+def test_missing_eps_diagnostic_never_fills_value():
+    periods=[{'date':d,'revenue':120,'income':10,'fcf':8,'eps':None,'basic_eps':None,
+              'diluted_shares':None} for d in ['2026-06-30','2026-03-31','2025-12-31','2025-09-30','2025-06-30']]
+    bal={'date':'2026-06-30','debt':30,'equity':100,'shares':5}
+    f=normalize_fundamentals('005930',periods,bal,40,NOW)
+    assert f['status']=='insufficient' and f['eligible'] is False
+    assert f['metrics']['ttm_eps'] is None and f['metrics']['pe'] is None
+    assert len(f['eps_gap_details'])==4
+    assert all(not d['basic_eps_available'] and not d['diluted_shares_available'] for d in f['eps_gap_details'])
 
 
 def test_public_gate_distinguishes_missing_fundamentals_and_price():

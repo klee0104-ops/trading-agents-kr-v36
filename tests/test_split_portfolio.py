@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 import json
 import pytest
 from data.sessions import KST
-from execution.split_portfolio import fresh,tick,summary,LONG,INVERSE
+from execution.split_portfolio import fresh,tick,summary,summary_at,LONG,INVERSE
 from tools.paper_portfolio import initialize
 
 NOW=datetime(2026,9,29,14,0,tzinfo=KST)
@@ -76,7 +76,45 @@ def test_stock_bias_no_fabrication():
 
 def test_public_portfolio_whitelist():
     from web.export_site import _PAPER_FIELDS
-    assert set(('portfolio_mode','sleeves','realized_pnl','unrealized_pnl'))<=set(_PAPER_FIELDS)
+    assert set(('portfolio_mode','sleeves','realized_pnl','unrealized_pnl','day_pnl','day_return_pct','valuation_audit'))<=set(_PAPER_FIELDS)
+
+
+def test_profit_audit_reconciles_costs_and_today_return():
+    d=tick(fresh(NOW),signal(),quotes(),NOW)
+    sm=summary_at(d,NOW+timedelta(minutes=5))
+    assert sm['valuation_audit']['status']=='ok'
+    assert sm['pnl']==pytest.approx(sm['realized_pnl']+sm['unrealized_pnl'],abs=.01)
+    assert sm['day_pnl']==pytest.approx(sm['pnl'],abs=.01)
+    assert sm['day_return_pct']==pytest.approx(sm['total_return_pct'],abs=.0001)
+    assert sm['fees']>0 and sm['unrealized_pnl']<0
+
+
+def test_profit_audit_hides_stale_or_mismatched_returns():
+    d=tick(fresh(NOW),signal(),quotes(),NOW)
+    stale=summary_at(d,NOW+timedelta(minutes=11))
+    assert stale['valuation_audit']['status']=='stale'
+    assert stale['pnl'] is None and stale['day_pnl'] is None and stale['total_return_pct'] is None
+    assert stale['realized_pnl']==0
+    d['sleeves']['short']['equity']+=100
+    bad=summary_at(d,NOW+timedelta(minutes=5))
+    assert bad['valuation_audit']['status']=='mismatch'
+    assert bad['pnl'] is None and bad['unrealized_pnl'] is None and bad['realized_pnl'] is None
+    d=tick(fresh(NOW),signal(),quotes(),NOW)
+    d['last_prices'][INVERSE]='invalid'
+    bad_quote=summary_at(d,NOW+timedelta(minutes=5))
+    assert bad_quote['valuation_audit']['status']=='mismatch'
+    assert bad_quote['pnl'] is None
+
+
+def test_today_and_cumulative_profit_have_separate_baselines():
+    first=tick(fresh(NOW),signal(),quotes(),NOW)
+    tomorrow=NOW+timedelta(days=1)
+    second=tick(first,signal(tomorrow),quotes(tomorrow,inv=4050),tomorrow)
+    sm=summary_at(second,tomorrow+timedelta(minutes=5))
+    assert sm['valuation_audit']['status']=='ok'
+    assert sm['day_pnl']==pytest.approx(sm['equity']-sum(b['equity'] for b in first['sleeves'].values()),abs=.01)
+    assert sm['pnl']==pytest.approx(sm['equity']-20_000_000,abs=.01)
+    assert sm['day_pnl']!=sm['pnl']
 
 
 def test_provider_quote_parsing():

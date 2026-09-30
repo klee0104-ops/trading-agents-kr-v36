@@ -238,32 +238,93 @@ def tick(state, envelope, quotes, now, long_report=None):
     return d
 
 
+def valuation_audit(d,now=None):
+    """Reconcile paper cash, holdings, realized P/L and marked equity."""
+    if not d.get('last_tick'):
+        return {'status':'waiting','note':'첫 시세 평가 대기'}
+    try:
+        prices=d['last_prices']
+        if not isinstance(prices,dict) or not number(d['initial_cash']) or d['initial_cash']<=0:
+            raise ValueError('ledger')
+        equity=realized=unrealized=0.
+        for book in d['sleeves'].values():
+            if not all(number(book[k]) for k in ('cash','equity','initial_cash','realized_pnl')):
+                raise ValueError('book')
+            marked=0.;open_pnl=0.
+            for code,h in book['holdings'].items():
+                price=prices.get(code)
+                if not number(price) or price<=0 or type(h.get('qty')) is not int or h['qty']<=0 or not number(h.get('cost')) or h['cost']<0:
+                    raise ValueError('holding')
+                marked+=h['qty']*price
+                open_pnl+=h['qty']*price-h['cost']
+            if abs(book['equity']-(book['cash']+marked))>.05:
+                raise ValueError('equity')
+            if abs((book['equity']-book['initial_cash'])-(book['realized_pnl']+open_pnl))>.05:
+                raise ValueError('pnl')
+            equity+=book['equity'];realized+=book['realized_pnl'];unrealized+=open_pnl
+        if abs((equity-d['initial_cash'])-(realized+unrealized))>.05:
+            raise ValueError('total')
+        stamp=datetime.fromisoformat(d['last_tick'])
+        if stamp.tzinfo is None: raise ValueError('timestamp')
+        if now is not None:
+            from data.sessions import market_status
+            age=(now-stamp).total_seconds()
+            if age<0 or (market_status(now)['code']=='open' and age>600):
+                return {'status':'stale','note':'장중 시세 평가가 10분 이상 지연 · 수익률 표시 보류',
+                        'checked_at':d['last_tick']}
+        return {'status':'ok','note':'모의 원장 계산 일치 · 거래소 독립 시세 검증은 아님',
+                'checked_at':d['last_tick']}
+    except (KeyError,TypeError,ValueError,OverflowError):
+        return {'status':'mismatch','note':'원장·손익 계산 불일치 또는 시세 누락 · 수익률 표시 보류',
+                'checked_at':d.get('last_tick')}
+
+
 def summary(d):
+    return summary_at(d)
+
+
+def summary_at(d,now=None):
+    audit=valuation_audit(d,now)
+    hide=audit['status'] in ('mismatch','stale')
+    prices={} if audit['status']=='mismatch' else d.get('last_prices') or {}
     names=instrument_names(d)
     sleeves=[]
     for key,b in d['sleeves'].items():
-        unrealized=sum(h['qty']*(d.get('last_prices') or {}).get(t, h['cost']/h['qty'])-h['cost']
-                       for t,h in b['holdings'].items())
+        unrealized=0 if audit['status']=='mismatch' else sum(
+            h['qty']*prices.get(t, h['cost']/h['qty'])-h['cost'] for t,h in b['holdings'].items())
         sleeves.append(dict(key=key,label=b['label'],initial_cash=b['initial_cash'],
-            cash=round(b['cash'],2),equity=round(b['equity'],2),pnl=round(b['equity']-b['initial_cash'],2),
-            realized_pnl=round(b['realized_pnl'],2),unrealized_pnl=round(unrealized,2),fees=round(b['fees'],2),
+            cash=round(b['cash'],2),equity=round(b['equity'],2),pnl=None if hide else round(b['equity']-b['initial_cash'],2),
+            realized_pnl=None if audit['status']=='mismatch' else round(b['realized_pnl'],2),
+            unrealized_pnl=None if hide else round(unrealized,2),fees=round(b['fees'],2),
             status=b['status'],paused=b['paused'],holdings=[dict(ticker=t,name=names.get(t,t),qty=h['qty'],
             average_cost=round(h['cost']/h['qty'],2)) for t,h in b['holdings'].items()]))
     equity=sum(b['equity'] for b in sleeves)
     gross=sum(b['equity']-b['cash'] for b in d['sleeves'].values())
-    inverse=sum(b['holdings'].get(INVERSE,{}).get('qty',0)*(d.get('last_prices') or {}).get(INVERSE,0) for b in d['sleeves'].values())
+    inverse=0 if audit['status']=='mismatch' else sum(
+        b['holdings'].get(INVERSE,{}).get('qty',0)*prices.get(INVERSE,0) for b in d['sleeves'].values())
     from execution.etf_contract import public_summary as execution_summary
+    day_base=sum(b['session_start'] for b in d['sleeves'].values())
+    day_ready=(bool(d.get('last_tick')) and all(b.get('session')==d['last_tick'][:10] for b in d['sleeves'].values())
+               and number(day_base) and day_base>0)
     return dict(execution_alignment=execution_summary(d),gross_exposure=round(gross,2),net_direction_exposure=round(gross-2*inverse,2),hedged=bool(inverse and gross>inverse),portfolio_mode=True,initial_cash=d['initial_cash'],equity=equity,
-        cash=sum(b['cash'] for b in sleeves),pnl=round(equity-d['initial_cash'],2),
-        total_return_pct=round((equity/d['initial_cash']-1)*100,4),sleeves=sleeves,
+        cash=sum(b['cash'] for b in sleeves),pnl=None if hide else round(equity-d['initial_cash'],2),
+        total_return_pct=None if hide else round((equity/d['initial_cash']-1)*100,4),
+        day_pnl=None if hide or not day_ready else round(equity-day_base,2),
+        day_return_pct=None if hide or not day_ready else round((equity/day_base-1)*100,4),
+        valuation_audit=audit,sleeves=sleeves,
         days=len(d['equity_history']),trades=len(d['trades']),recent_trades=d['trades'][-30:][::-1],
         equity_curve=d['equity_history'][-250:],last_tick=d['last_tick'],created_at=d['created_at'],
-        fees=sum(b['fees'] for b in sleeves),realized_pnl=sum(b['realized_pnl'] for b in sleeves),
-        unrealized_pnl=sum(b['unrealized_pnl'] for b in sleeves))
+        fees=sum(b['fees'] for b in sleeves),
+        realized_pnl=None if audit['status']=='mismatch' else round(sum(b['realized_pnl'] for b in d['sleeves'].values()),2),
+        unrealized_pnl=None if hide else round(sum(
+            sum(h['qty']*prices.get(t,h['cost']/h['qty'])-h['cost'] for t,h in b['holdings'].items())
+            for b in d['sleeves'].values()),2))
 
 
 def read_summary(path):
     import json
     from pathlib import Path
     path=Path(path)
-    return summary(json.loads(path.read_text(encoding='utf-8'))) if path.exists() else None
+    if not path.exists(): return None
+    from data.sessions import kst_now
+    return summary_at(json.loads(path.read_text(encoding='utf-8')),kst_now())

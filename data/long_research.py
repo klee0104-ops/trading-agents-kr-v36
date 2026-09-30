@@ -111,6 +111,10 @@ def normalize_fundamentals(code,periods,balance,price,now,currency='KRW',spec=No
         result.update(status='ok',period_end=periods[0]['date'],metrics=metrics)
         if eps is None:
             result.update(status='insufficient',missing=['분기 EPS 누락: '+p['date'] for p in periods[:4] if not finite(p.get('eps'))])
+            result['eps_gap_details']=[
+                {'period':p['date'],'basic_eps_available':finite(p.get('basic_eps')),
+                 'diluted_shares_available':finite(p.get('diluted_shares'))}
+                for p in periods[:4] if not finite(p.get('eps'))]
             return result
         result['eligible']=bool(income>0 and fcf>0 and eps>0 and metrics['revenue_yoy_pct']>=0
                                 and 0<=metrics['debt_equity']<=1 and 0<metrics['pe']<=20 and 0<metrics['pb']<=3)
@@ -129,7 +133,9 @@ def collect_fundamentals(now,universe=None):
                 return float(frame.loc[row,col]) if row in frame.index and col in frame.columns else None
             columns=sorted(set(inc.columns)&set(cf.columns),reverse=True)[:5]
             periods=[{'date':str(c.date()),'revenue':val(inc,'Total Revenue',c),'income':val(inc,'Net Income',c),
-                      'eps':val(inc,'Diluted EPS',c),'fcf':val(cf,'Free Cash Flow',c)} for c in columns]
+                      'eps':val(inc,'Diluted EPS',c),'basic_eps':val(inc,'Basic EPS',c),
+                      'diluted_shares':val(inc,'Diluted Average Shares',c),
+                      'fcf':val(cf,'Free Cash Flow',c)} for c in columns]
             c=columns[0]
             bal={'date':str(c.date()),'debt':val(bs,'Total Debt',c),'equity':val(bs,'Stockholders Equity',c),'shares':val(bs,'Ordinary Shares Number',c)}
             info=t.get_info();price=info.get('regularMarketPrice')

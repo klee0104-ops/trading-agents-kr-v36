@@ -83,7 +83,7 @@ def candidate_gate(f,report,gate):
         else:
             phase='eligible';reason='보고서·가격 기준 충족 (현재 시세는 모의 주문 시 재확인)'
     return {'phase':phase,'reason':reason,'criteria':details,
-            'next_review':'재무자료는 다음 수집 때 확인, 장기팀 모델은 마지막 검토 후 7일 이내 재호출하지 않음',
+            'next_review':'승인된 매수 배분이 없으면 다음 날 최대 3회 모델 조사, 배분이 있으면 7일 뒤 재검토. 재무 누락은 매일 다시 수집',
             'buy_below':next((a['buy_below'] for a in gate['allocations'] if a.get('code')==code and a.get('weight',0)>0),None)}
 
 def public_summary(state,now):
@@ -104,7 +104,8 @@ def public_summary(state,now):
         candidates.append({'code':code,'name':universe[code]['name'],'status':f.get('status'),
                            'eligible':f.get('eligible',False),'period_end':f.get('period_end'),
                            'collected_at':f.get('collected_at'),'metrics':f.get('metrics',{}),
-                           'missing':f.get('missing',[]),'source':f.get('source','자료 미확보'),
+                           'missing':f.get('missing',[]),'eps_gap_details':f.get('eps_gap_details',[]),
+                           'source':f.get('source','자료 미확보'),
                            'gate':candidate_gate(f,report,gate)})
     roles=[]
     for r in report.get('roles',[]):
