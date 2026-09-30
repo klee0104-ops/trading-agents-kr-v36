@@ -31,6 +31,8 @@ def test_fundamental_screen_and_missing():
 def test_independent_roles_three_calls_and_valid_plan():
     m=Model();r=run_team(m,facts(),news(),NOW)
     assert r['status']=='approved' and r['calls']==3 and len(r['roles'])==3
+    assert '005930 삼성전자=[M1]' in m.calls[1][1]
+    assert '000660 SK하이닉스=[M2]' in m.calls[1][1]
     assert '별도 두 역할' not in m.calls[1][1]
     assert '별도 두 역할' in m.calls[2][1]
     assert all(x[2]['use_web_search'] is False for x in m.calls)
@@ -97,6 +99,15 @@ def test_public_report_no_news_title_and_ui_safe():
     p=public_summary(st,NOW)
     assert p['events'][0]['evidence_id']=='N1'
     assert '[M1]' in p['roles'][0]['stocks'][0]['points'][0]
+
+
+def test_public_review_issue_uses_safe_reason_label():
+    r=run_team(Model(),facts(),news(),NOW)
+    r.update(status='held',allocations=[],failure_reason='missing company evidence')
+    p=public_summary({'report':r,'news':news()},NOW)
+    assert p['review_issue']=='종목별 재무 근거 ID 연결 실패'
+    r['failure_reason']='unsafe raw model text'
+    assert public_summary({'report':r,'news':news()},NOW)['review_issue']=='모델 응답 또는 보고서 검증 실패'
 
 def test_cycle_weekly_budget_daily_fundamentals_and_news_after_hours(tmp_path,monkeypatch):
     import data.long_research as data

@@ -127,8 +127,13 @@ def public_summary(state,now):
     note=report.get('note','장기팀 조사 대기')
     if report.get('status')=='approved' and not gate['allocations']:
         note='장기 조사 완료 · 승인된 종목별 매수 배분 없음 (각 종목의 자료·가치평가 조건 확인)'
+    issues={'missing company evidence':'종목별 재무 근거 ID 연결 실패',
+            'citation validation':'근거 ID 또는 수치 검증 실패',
+            'coverage':'조사 대상 전체 검토 누락'}
+    review_issue=issues.get(report.get('failure_reason'),
+                            '모델 응답 또는 보고서 검증 실패' if report.get('failure_reason') else None)
     return {'deferred':[{'name':clean(f['name']),'missing':[clean(m) for m in f.get('missing',[])]} for f in report.get('deferred',[])],'watchlist':watch,'status':gate['status'],'generated_at':report.get('generated_at'),'valid_until':report.get('valid_until'),
-            'note':clean(note),'candidates':candidates,'roles':roles,
+            'note':clean(note),'review_issue':review_issue,'candidates':candidates,'roles':roles,
             'allocations':gate['allocations'],'blocked_codes':gate['blocked_codes'],'block_reasons':gate['block_reasons'],
             'block_by_code':gate['block_by_code'],
             'news_status':news.get('status','waiting'),'news_checked_at':news.get('checked_at'),

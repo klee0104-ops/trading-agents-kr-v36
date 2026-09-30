@@ -54,7 +54,11 @@ def research_ready(f):
 def run_team(llm,fundamentals,news,now,max_calls=3,universe=None):
     universe=UNIVERSE if universe is None else universe
     reg=registry(fundamentals,news)
-    context=json.dumps(reg,ensure_ascii=False)
+    # Make each company's evidence ID explicit before the source payload. The
+    # critic must still pass the unchanged per-company citation validator.
+    evidence_map='종목별 필수 재무 근거: '+', '.join(
+        f"{f['code']} {f['name']}=[M{i}]" for i,f in enumerate(fundamentals,1))
+    context=evidence_map+'\n'+json.dumps(reg,ensure_ascii=False)
     report={'schema':1,'generated_at':now.isoformat(),'valid_until':(now+timedelta(days=8)).isoformat(),
             'status':'held','fundamentals':fundamentals,'sources':public_registry(reg),'roles':[],
             'allocations':[],'horizon_days':180,'calls':0,'reviewed_news_ids':[n['id'] for n in news.get('events',[])[:24]],
