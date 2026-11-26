@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DESTINATION = 'klee0104-ops/trading-agents-kr-report'
 SOURCE = 'klee0104-ops/trading-agents-kr-v36'
 URL = 'https://klee0104-ops.github.io/trading-agents-kr-report/'
+# GitHub 이 제공하는 비공개 이메일(noreply). 실제 이메일을 공개 저장소에 남기지 않는다.
+PUBLISH_IDENTITY = {'name': 'signal-lab-publisher', 'email': '310007092+klee0104-ops@users.noreply.github.com'}
 
 def api(endpoint, method='GET', payload=None, missing=False):
     gh = shutil.which('gh')
@@ -50,9 +52,19 @@ def publish_report(index_path):
     previous = api('repos/' + DESTINATION + '/contents/index.html', missing=True)
     if previous and base64.b64decode(previous.get('content', '')) == blob:
         return {'url': URL, 'changed': False}
-    data = {'message': 'Update validated public simulation report', 'content': base64.b64encode(blob).decode(), 'branch': 'main'}
-    if previous: data['sha'] = previous['sha']
-    api('repos/' + DESTINATION + '/contents/index.html', 'PUT', data)
+    # (V3.33) 개인정보·과거 공개본 노출 방지:
+    #  ① 작성자를 GitHub noreply 주소로 고정 — 예전엔 계정 기본 이메일(Gmail)이 공개 커밋에 남았다.
+    #  ② 매번 부모 없는 커밋 1개로 main 을 교체 — 공개 저장소에 지난 공개본 이력이 쌓이지 않는다.
+    blob_sha = api('repos/' + DESTINATION + '/git/blobs', 'POST',
+                   {'content': base64.b64encode(blob).decode(), 'encoding': 'base64'})['sha']
+    tree_sha = api('repos/' + DESTINATION + '/git/trees', 'POST', {'tree': [
+        {'path': 'index.html', 'mode': '100644', 'type': 'blob', 'sha': blob_sha},
+        {'path': '.nojekyll', 'mode': '100644', 'type': 'blob', 'content': ''},
+    ]})['sha']
+    commit_sha = api('repos/' + DESTINATION + '/git/commits', 'POST', {
+        'message': 'Update validated public simulation report', 'tree': tree_sha, 'parents': [],
+        'author': dict(PUBLISH_IDENTITY), 'committer': dict(PUBLISH_IDENTITY)})['sha']
+    api('repos/' + DESTINATION + '/git/refs/heads/main', 'PATCH', {'sha': commit_sha, 'force': True})
     return {'url': URL, 'changed': True}
 
 def publish_if_enabled(index_path):
@@ -62,4 +74,19 @@ def publish_if_enabled(index_path):
     if config.get('enabled') is not True: return None
     if os.environ.get('TA_HARNESS_OFFLINE') == '1':
         raise PublicationBlocked('Publication disabled during tests')
+    # (V3.40) 일시 중지: paused_until(KST 날짜) 전까지 업로드하지 않는다.
+    # notice_publish_pending 이 true 면 공지가 담긴 다음 게시 1회만 허용하고 스스로 false 로 바꾼다.
+    paused_until = str(config.get('paused_until') or '')
+    if paused_until:
+        from data.sessions import kst_now
+        if str(kst_now().date()) < paused_until:
+            if config.get('notice_publish_pending') is True:
+                result = publish_report(index_path)
+                config['notice_publish_pending'] = False
+                config['notice_published_at'] = kst_now().isoformat(timespec='seconds')
+                tmp = config_path.with_name(config_path.name + '.tmp')
+                tmp.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding='utf-8')
+                os.replace(tmp, config_path)
+                return result
+            return {'url': URL, 'changed': False, 'paused': True}
     return publish_report(index_path)

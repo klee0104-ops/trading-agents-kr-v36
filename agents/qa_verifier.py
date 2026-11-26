@@ -22,15 +22,15 @@ QA_DEBATE_SYSTEM_PROMPT = """당신은 QA 검증(품질보증) 에이전트입�
 주어진 소스 자료만 보고 토론 발언에 인용된 근거(evidence)가 실제로 그 자료에 있는
 내용인지만 대조하세요. 새로운 사실을 찾거나 판단을 내리지 마세요 — 오직 대조만 하세요.
 
-각 근거 항목에 대해:
-- 요청된 모든 evidence를 원문 그대로 각각 한 번씩 반환하세요. 누락·재작성하지 마세요.
+검증할 근거마다 (1), (2) … 번호가 붙어 있습니다. 각 근거에 대해:
+- 요청된 모든 번호를 빠짐없이 한 번씩 반환하세요. 근거 문장을 다시 적을 필요는 없습니다.
 - 소스 자료에 실질적으로 등장하는 내용이면 verified: true
 - 소스 자료에 없거나, 소스와 명백히 다른 수치/주장이면 verified: false
 - 근거에 붙은 ID([M1], [N3] 등)가 가리키는 자료와 내용이 다르면 verified: false
 - 뉴스 근거인데 매체·ID가 없거나, 목록에 없는 논문·저자·연도를 인용했으면 verified: false
 
-반드시 JSON만 출력:
-{"results": [{"evidence": "...", "verified": true, "note": "짧은 이유"}]}"""
+반드시 JSON 객체 하나만 출력 (verified 는 true/false, 따옴표 없이):
+{"results": [{"no": 1, "verified": true, "note": "짧은 이유"}]}"""
 
 QA_FINAL_SYSTEM_PROMPT = """당신은 QA 검증(품질보증) 에이전트입니다. 웹 검색 없이,
 원자료가 제공되면 먼저 그것을 기준으로 사실을 확인하고, 토론·리스크 판단·최종 결론을
@@ -57,13 +57,103 @@ def _norm_ev(text) -> str:
     return _re.sub(r"\s+", "", s)
 
 
+_RESULT_KEYS = ("results", "items", "result", "evidence_results", "verifications", "검증결과")
+
+
+def _qa_items(result) -> list:
+    """(V3.31) QA 응답에서 판정 목록을 꺼낸다. {"results": [...]} 외에 배열만 오거나 키 이름이 다른 응답도 받는다."""
+    if isinstance(result, list):
+        return [i for i in result if isinstance(i, dict)]
+    if not isinstance(result, dict):
+        return []
+    for k in _RESULT_KEYS:
+        v = result.get(k)
+        if isinstance(v, list):
+            return [i for i in v if isinstance(i, dict)]
+    lists = [v for v in result.values() if isinstance(v, list) and v and all(isinstance(i, dict) for i in v)]
+    if len(lists) == 1:
+        return lists[0]
+    if "verified" in result:  # 항목 하나만 객체로 온 경우
+        return [result]
+    return []
+
+
+def _item_no(item: dict):
+    for k in ("no", "id", "index", "number", "번호"):
+        v = item.get(k)
+        if type(v) is int:
+            return v
+        if isinstance(v, str) and v.strip().strip("()[]").isdigit():
+            return int(v.strip().strip("()[]"))
+    return None
+
+
+def _strip_ev(text: str) -> str:
+    """비교용: 앞의 불릿·번호, 끝의 근거 ID 를 떼고 정규화."""
+    import re as _re
+    t = str(text or "").strip()
+    t = _re.sub(r"^[-•*]\s*", "", t)
+    t = _re.sub(r"^\(?\d{1,2}\)[.:]?\s*", "", t)
+    return _norm_ev(t)
+
+
+def _match_items(evidence: list[str], items: list[dict]) -> dict[int, dict]:
+    """근거 순번(1부터) → 판정 항목. 번호 우선, 없으면 문장(정확/정규화/ID 제외) 대조. 하나에 둘 이상 걸리면 매칭 안 함."""
+    from rules.citations import ID_RE
+    by_no: dict[int, list] = {}
+    for it in items:
+        n = _item_no(it)
+        if n is not None:
+            by_no.setdefault(n, []).append(it)
+    out: dict[int, dict] = {}
+    for idx, ev in enumerate(evidence, 1):
+        cands = by_no.get(idx, [])
+        if not cands:
+            cands = [i for i in items if _item_no(i) is None and i.get("evidence") == ev]
+        if not cands:
+            cands = [i for i in items if _item_no(i) is None and _norm_ev(i.get("evidence")) == _norm_ev(ev)]
+        if not cands:
+            bare = _strip_ev(ID_RE.sub("", ev))
+            cands = [i for i in items if _item_no(i) is None and bare
+                     and _strip_ev(ID_RE.sub("", str(i.get("evidence") or ""))) == bare]
+        if len(cands) == 1:
+            out[idx] = cands[0]
+    return out
+
+
+def code_verify_evidence(ev: str, registry: list) -> bool:
+    """(V3.31) 근거가 인용한 자료 문장을 그대로 옮긴 것이면 LLM 없이 코드로 '확인'.
+    - M/F/Q/R: ID 를 뗀 문장이 그 ID 자료 문장과 (공백·기호 표기만 빼고) 같아야 함
+    - N(뉴스): 매체 괄호·ID 를 뗀 제목이 그 뉴스 원문 제목에 12자 이상 그대로 들어 있어야 함
+    조금이라도 바꿔 쓴 근거는 여기서 확인하지 않고 LLM 대조로 넘긴다(통과 기준을 낮추지 않음)."""
+    import re as _re
+    from rules.citations import ID_RE
+    ids = [m.group(1) for m in ID_RE.finditer(str(ev))]
+    if len(ids) != 1:
+        return False
+    by_id = {e.get("id"): e for e in registry or [] if isinstance(e, dict)}
+    src = by_id.get(ids[0])
+    if not src or not src.get("text"):
+        return False
+    claim = ID_RE.sub("", str(ev)).strip()
+    if src.get("kind") == "N":
+        claim = _re.sub(r"\s*\((?:출처:\s*)?[^()]{1,40}\)\s*$", "", claim)
+        c = _norm_ev(claim)
+        return len(c) >= 12 and c in _norm_ev(src["text"])
+    return _norm_ev(claim) == _norm_ev(src["text"])
+
+
 def verify_debate_evidence(llm: LLMClient, transcript: list[dict],
                             analyst_report: dict, similar_cases_context: str = "",
                             quant: dict | None = None) -> list[dict]:
     """토론 각 턴의 evidence를 소스 자료와 대조한다. (하위 QA)
     (V3.14) quant(정량 지표)가 있으면 ① 소스 자료에 지표 수치를 포함시켜 LLM이 대조하게 하고,
     ② 코드로 정성 주장("과매수", "골든크로스", "외국인 순매수" …)을 지표 라벨과 대조해
-    모순되는 근거는 LLM 판정과 무관하게 unverified 로 내린다."""
+    모순되는 근거는 LLM 판정과 무관하게 unverified 로 내린다.
+    (V3.31) ① 자료 문장을 그대로 옮긴 근거는 코드가 먼저 확인하고(LLM 생략),
+    ② 나머지는 번호로 묻고 번호로 받아 매칭하며(문장 재작성에 흔들리지 않음),
+    ③ 응답과 하나도 연결되지 않으면 1회 재시도 후 '미검증'이 아니라 'QA 판정 불가(qa_unknown)'로 따로 남긴다.
+       — 9/30~10/22 중 7일에서 한쪽 근거가 통째로 0건 처리되어 중재·위험 판단이 한쪽으로 기울던 문제."""
     quant_src = ""
     if quant:
         from rules.quant import quant_text
@@ -74,46 +164,65 @@ def verify_debate_evidence(llm: LLMClient, transcript: list[dict],
         quant_src = "\n" + registry_text(registry)
     source_text = (
         f"[분석가 리포트]\n{analyst_report.get('summary', '')}\n"
-        f"주요 포인트: {', '.join(analyst_report.get('notable_points', []))}\n"
+        f"주요 포인트: {', '.join(str(x) for x in analyst_report.get('notable_points', []))}\n"
         f"{similar_cases_context}{quant_src}"
     )
 
     qa_results = []
     for turn in transcript:
-        evidence = turn.get("evidence") or []
+        evidence = [e for e in (turn.get("evidence") or []) if isinstance(e, str) and e.strip()]
         if not evidence:
             # 근거를 아예 인용하지 않은 발언은 검증할 게 없으니 그 자체를 이슈로 남긴다.
             qa_results.append({
                 "round": turn.get("round"), "stance": turn.get("stance"),
                 "verified_count": 0, "total_count": 0,
                 "unverified": [], "no_evidence_cited": True,
+                "qa_unknown": [], "qa_status": "no_evidence",
             })
             continue
 
-        user_prompt = f"{source_text}\n\n[검증할 근거 목록]\n" + "\n".join(f"- {e}" for e in evidence)
-        # (V3.29) 근거에 ID·출처가 붙어 응답이 길어졌다 — 500 토큰에서 잘려 실전 시험이 중단됨(9/29). 1200 으로 늘리고,
-        # 그래도 JSON 이 깨지면 파이프라인을 멈추지 않고 이 턴의 근거를 전부 미검증으로 둔다(승인 수가 늘지 않는 쪽).
-        try:
-            result = llm.complete_json(QA_DEBATE_SYSTEM_PROMPT, user_prompt, max_tokens=1200)
-        except (ValueError, TypeError) as e:
-            print(f"[QA 응답 오류 → 이 턴 근거 전부 미검증 처리] {e}")
-            result = {"results": [], "qa_error": True}
-        items = result.get("results", []) if isinstance(result, dict) else []
-        # 원래 요청한 근거만 집계한다. 누락·중복·문자열 "true"는 승인으로 간주하지 않는다.
-        if not isinstance(items, list):
-            items = []
-        unverified = []
-        qa_unmatched = 0  # (V3.29) QA 가 근거 문장을 되돌려 줄 때 띄어쓰기·기호만 바꿔 한 건도 안 맞던 문제 진단용
-        for ev in evidence:
-            matches = [i for i in items if isinstance(i, dict) and i.get("evidence") == ev]
-            if not matches:  # 공백·따옴표·화살표 표기만 다른 경우는 같은 문장으로 본다(여전히 정확히 1개여야 함)
-                matches = [i for i in items if isinstance(i, dict) and _norm_ev(i.get("evidence")) == _norm_ev(ev)]
-            if not matches:
-                qa_unmatched += 1
-            if len(matches) != 1 or matches[0].get("verified") is not True:
-                if ev not in unverified:
-                    unverified.append(ev)
-        verified_count = sum(ev not in unverified for ev in evidence)
+        code_ok = {i for i, ev in enumerate(evidence, 1) if registry and code_verify_evidence(ev, registry)}
+        ask = [i for i in range(1, len(evidence) + 1) if i not in code_ok]
+        verdict: dict[int, bool] = {i: True for i in code_ok}
+        unknown_idx: list[int] = []
+        qa_unmatched = 0
+        raw_preview = ""
+        if ask:
+            sub = [evidence[i - 1] for i in ask]
+            user_prompt = (f"{source_text}\n\n[검증할 근거 목록]\n"
+                           + "\n".join(f"- ({k}) {e}" for k, e in enumerate(sub, 1)))
+            matched: dict[int, dict] = {}
+            for attempt in range(2):
+                # (V3.29) 근거에 ID·출처가 붙어 응답이 길어졌다 — 1200 토큰. JSON 이 깨지면 이 시도는 실패로 둔다.
+                try:
+                    result = llm.complete_json(QA_DEBATE_SYSTEM_PROMPT, user_prompt, max_tokens=1200)
+                except (ValueError, TypeError) as e:
+                    print(f"[QA 응답 오류 · {turn.get('stance')} r{turn.get('round')} · 시도 {attempt + 1}] {str(e)[:160]}")
+                    result = None
+                items = _qa_items(result)
+                matched = _match_items(sub, items)
+                if matched:
+                    break
+                import json as _json
+                try:
+                    raw_preview = _json.dumps(result, ensure_ascii=False)[:300]
+                except (TypeError, ValueError):
+                    raw_preview = str(result)[:300]
+                print(f"[QA 응답 매칭 실패 · {turn.get('stance')} r{turn.get('round')} · 시도 {attempt + 1}] "
+                      f"근거 {len(sub)}건 중 0건 연결 · 응답 앞부분: {raw_preview}")
+            for k, i in enumerate(ask, 1):
+                it = matched.get(k)
+                if it is None:
+                    qa_unmatched += 1
+                    if matched:  # 일부만 빠진 경우: 승인하지 않음(미검증)
+                        verdict[i] = False
+                    else:        # 전부 연결 실패: 판정 자체가 없음 → 판정 불가로 분리
+                        unknown_idx.append(i)
+                else:
+                    verdict[i] = it.get("verified") is True
+
+        unknown = list(dict.fromkeys(evidence[i - 1] for i in unknown_idx))
+        unverified = list(dict.fromkeys(evidence[i - 1] for i, ok in sorted(verdict.items()) if not ok))
 
         quant_contra: list[dict] = []
         if quant:
@@ -123,7 +232,6 @@ def verify_debate_evidence(llm: LLMClient, transcript: list[dict],
                     quant_contra.append({"evidence": c["text"], "claim": c["claim"], "actual": c["actual"]})
                     if c["text"] not in unverified:
                         unverified.append(c["text"])
-            verified_count = sum(ev not in unverified for ev in evidence)
 
         # (V3.24) 출처 규칙: 근거 ID가 없거나, 목록에 없는 ID거나, 수치가 인용 자료와 다르면
         # LLM 판정과 무관하게 미검증으로 내린다 (코드 판정이 우선).
@@ -135,7 +243,8 @@ def verify_debate_evidence(llm: LLMClient, transcript: list[dict],
                     citation_rejected.append({"evidence": c["text"], "reason": c["reason"]})
                     if c["text"] not in unverified:
                         unverified.append(c["text"])
-            verified_count = sum(ev not in unverified for ev in evidence)
+        unknown = [e for e in unknown if e not in unverified]
+        verified_count = sum(1 for e in evidence if e not in unverified and e not in unknown)
 
         qa_results.append({
             "round": turn.get("round"), "stance": turn.get("stance"),
@@ -144,6 +253,10 @@ def verify_debate_evidence(llm: LLMClient, transcript: list[dict],
             "quant_contradicted": quant_contra,
             "citation_rejected": citation_rejected,
             "qa_unmatched": qa_unmatched,
+            "code_verified": len(code_ok),
+            "qa_unknown": unknown,
+            "qa_status": "failed" if unknown else "ok",
+            **({"qa_raw_preview": raw_preview} if unknown and raw_preview else {}),
         })
 
     return qa_results

@@ -12,10 +12,10 @@ CLI 엔트리 포인트.
                                    # 변동성 이벤트+뉴스 수집 (LLM 미사용, 토큰 소모 없음)
 
 API 키 보안 (SECURITY.md 참고):
-  python cli.py set-key gemini|anthropic   # 키를 Windows 자격 증명 관리자에 저장 (입력 화면에 안 보임)
+  python cli.py set-key gemini|anthropic|dart|alpaca_id|alpaca_secret|reddit_id|reddit_secret  # 키를 Windows 자격 증명 관리자에 저장
   python cli.py key-status                 # 키가 어디서 로드되는지 확인 (값은 마스킹)
   python cli.py migrate-keys               # .env의 평문 키를 자격 증명 관리자로 옮기고 .env에서 삭제
-  python cli.py delete-key gemini|anthropic
+  python cli.py delete-key gemini|anthropic|dart|alpaca_id|alpaca_secret
   python cli.py check-secrets              # 프로젝트 파일에 키가 새어 있는지 검사
   python cli.py package                    # .env/DB/기록을 뺀 공유용 zip 생성 (release/ 폴더)
 
@@ -156,7 +156,7 @@ def _provider_arg(args) -> str:
     p = (args[0] if args else Config.LLM_PROVIDER).strip().lower()
     from security.secret_store import KEY_NAMES
     if p not in KEY_NAMES:
-        print(f"provider는 {', '.join(KEY_NAMES)} 중 하나여야 합니다. (naver_id/naver_secret = 네이버 검색 API)")
+        print(f"provider는 {', '.join(KEY_NAMES)} 중 하나여야 합니다. (dart = OpenDART 공시 API)")
         sys.exit(1)
     return p
 
@@ -176,7 +176,8 @@ def cmd_set_key(args):
         print(f"[실패] {e}")
         sys.exit(1)
     st = key_status(provider)
-    print(f"[완료] {st.env_name} 저장됨 → Windows 자격 증명 관리자 (값: {mask(value)})")
+    label = "값 표시 안 함" if provider in ("dart", "alpaca_id", "alpaca_secret") else f"값: {mask(value)}"
+    print(f"[완료] {st.env_name} 저장됨 → Windows 자격 증명 관리자 ({label})")
     if st.source == "environment":
         print("  ※ 시스템 환경변수에 같은 이름의 키가 있어서 그쪽이 우선 사용됩니다.")
     if st.dotenv_has_plaintext:
@@ -194,12 +195,12 @@ def cmd_key_status():
     from security.secret_store import key_status, keyring_available
     print(f"현재 LLM_PROVIDER = {Config.LLM_PROVIDER}")
     print(f"OS 자격 증명 저장소 사용 가능: {'예' if keyring_available() else '아니오 (keyring 미설치 또는 이 OS에 저장소 없음)'}")
-    for p in ("anthropic", "gemini"):
+    for p in ("anthropic", "gemini", "dart", "alpaca_id", "alpaca_secret"):
         st = key_status(p)
         src = {"environment": "시스템 환경변수", "keyring": "자격 증명 관리자(권장)",
                ".env": ".env 파일(평문, 비권장)", "none": "없음"}[st.source]
         line = f"- {st.env_name}: {'있음' if st.found else '없음'} | 출처: {src}"
-        if st.found:
+        if st.found and p not in ("dart", "alpaca_id", "alpaca_secret"):
             line += f" | {st.masked}"
         print(line)
         if st.dotenv_has_plaintext:
@@ -219,7 +220,8 @@ def cmd_migrate_keys():
         if v and not is_placeholder(v):
             store_in_keyring(provider, v)
             remove_key_from_dotenv(provider)
-            print(f"[이동] {name} ({mask(v)}) → 자격 증명 관리자, .env에서 삭제")
+            label = "값 표시 안 함" if provider in ("dart", "alpaca_id", "alpaca_secret") else mask(v)
+            print(f"[이동] {name} ({label}) → 자격 증명 관리자, .env에서 삭제")
             moved += 1
     print(f"완료: {moved}개 이동." if moved else ".env에 옮길 평문 키가 없습니다.")
 

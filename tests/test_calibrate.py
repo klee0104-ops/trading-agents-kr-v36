@@ -27,3 +27,12 @@ def test_shrinks_overconfident_bin():
 def test_as_of_excludes_future():
     m = fit_calibration(_recs(25, 12), as_of="2026-08-05")
     assert m["total"] == 4 and not m["active"]
+
+
+def test_early_calibration_is_active_but_shift_is_limited():
+    for count in (12, 19):
+        assert not fit_calibration(_recs(count, 0))["active"]
+        m = fit_calibration(_recs(count, 0), experimental=True)
+        result = apply_calibration(70, m)
+        assert m["active"] and result["applied"]
+        assert 70 - 15 * count / 20 <= result["p"] < 70

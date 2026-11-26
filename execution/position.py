@@ -38,16 +38,17 @@ def vol_scale(realized_vol_pct: Optional[float], target_vol_pct: float = TARGET_
 
 def position_from_probability(up_probability: Optional[float], realized_vol_pct: Optional[float] = None,
                               *, target_vol_pct: float = TARGET_VOL_PCT, min_edge: float = MIN_EDGE,
-                              kelly_fraction: float = KELLY_FRACTION, max_position: float = MAX_POSITION) -> dict:
+                              kelly_fraction: float = KELLY_FRACTION, max_position: float = MAX_POSITION,
+                              vol_floor: float = 0.25) -> dict:
     """상승확률(0~100) → 포지션(-1~+1). 반환에 이유를 함께 넣어 대시보드에 보인다."""
     from rules.outlook import clamp_probability
     if clamp_probability(up_probability) is None:  # (V3.25) None/NaN/무한대/문자 → 현금
         return {"position": 0.0, "edge": None, "vol_scale": None, "instrument": "cash",
                 "reason": "확률 없음 → 현금"}
-    up_probability = float(up_probability)
+    up_probability = clamp_probability(up_probability)  # (V3.31) 0.62 같은 소수 확률을 1%로 착각하던 문제
     p = max(0.0, min(1.0, float(up_probability) / 100.0))
     edge = 2 * p - 1                      # Kelly f* (1:1 배당)
-    vs = vol_scale(realized_vol_pct, target_vol_pct)
+    vs = vol_scale(realized_vol_pct, target_vol_pct, lo=vol_floor)
     if abs(edge) < min_edge:
         return {"position": 0.0, "edge": round(edge, 3), "vol_scale": round(vs, 3), "instrument": "cash",
                 "reason": f"확률 {up_probability:.0f}% → edge {edge:+.2f} 가 기준 {min_edge} 미만 → 현금"}
@@ -114,7 +115,10 @@ def performance(returns_pct: Sequence[Optional[float]], positions: Optional[Sequ
     traded = [r for r in rets if r != 0.0]
     wins = [r for r in traded if r > 0]
     losses = [-r for r in traded if r < 0]
-    pf = (sum(wins) / sum(losses)) if losses else (None if not wins else float("inf"))
+    # With no losing trades the ratio has no finite denominator. Keep it
+    # unavailable instead of emitting Infinity, which is invalid JSON and
+    # prevents the local dashboard from loading the entire history response.
+    pf = (sum(wins) / sum(losses)) if losses else None
     out = {
         "days": n,
         "total_return_pct": round((eq - 1) * 100, 3),
@@ -124,7 +128,7 @@ def performance(returns_pct: Sequence[Optional[float]], positions: Optional[Sequ
         "max_drawdown_pct": round(mdd * 100, 3),
         "traded_days": len(traded),
         "win_rate": round(len(wins) / len(traded), 3) if traded else None,
-        "profit_factor": (round(pf, 2) if pf not in (None, float("inf")) else pf),
+        "profit_factor": round(pf, 2) if pf is not None else None,
         "equity_curve_pct": curve,
     }
     if positions is not None:

@@ -48,7 +48,20 @@ def validate_role(reply,reg,universe=None):
 
 def research_ready(f):
     m=f.get('metrics') or {}
-    return f.get('status') in ('ok','insufficient') and all(finite(m.get(k)) for k in ('price','ttm_income','ttm_fcf','revenue_yoy_pct','debt_equity','pb'))
+    verification=f.get('dart_verification') or {}
+    return (verification.get('status') in (None,'verified','verified_derived_eps','partial_eps','partial_debt','partial_debt_eps')
+            and f.get('status') in ('ok','insufficient')
+            and all(finite(m.get(k)) for k in ('price','ttm_income','ttm_fcf','revenue_yoy_pct','debt_equity','pb')))
+
+
+STARTER_WEIGHT = .05
+
+
+def entry_limits(metrics):
+    """Conservative full-size limit and the already screened starter ceiling."""
+    price=metrics['price'];eps=metrics['ttm_eps'];pb=metrics['pb']
+    book_value_per_share=price/pb
+    return min(price,eps*15,book_value_per_share*2), min(price,eps*20,book_value_per_share*3)
 
 
 def run_team(llm,fundamentals,news,now,max_calls=3,universe=None):
@@ -87,31 +100,46 @@ def run_team(llm,fundamentals,news,now,max_calls=3,universe=None):
             return report
         plan=call('장기 운용 담당: 양쪽 근거를 비교해 계획을 정하세요. 하락만 보고 물타기하지 마세요. '
                   'eligible=false이거나 EPS/PER가 누락된 종목은 반드시 비중 0 또는 allocations에서 제외하세요. '
-                  '각 종목 비중 0~0.25, 총 비중 0.5 이하, 같은 업종 합산 0.3 이하, 나머지 현금. 매수 기준가는 현재가, TTM EPS×15, 주당 장부가×2 중 최솟값 이하입니다. 이는 보수적 필터일 뿐 적정가 보장이 아닙니다. valuation_basis는 인용된 가치평가 근거여야 합니다. '
+                  '각 종목 비중 0~0.25, 총 비중 0.5 이하, 같은 업종 합산 0.3 이하, 나머지 현금. 일반 매수 기준가는 현재가, TTM EPS×15, 주당 장부가×2 중 최솟값 이하입니다. 그보다 높더라도 기초 재무·공시·반대검토가 모두 통과하고 현재가, TTM EPS×20, 주당 장부가×3 중 최솟값 이하라면 코드가 종목당 최대 5% 기초 진입으로 줄여 검토합니다. 기준을 넘긴 종목만 제외하고 다른 종목은 유지합니다. 이는 보수적 모의운용 규칙일 뿐 적정가 보장이 아닙니다. valuation_basis는 인용된 가치평가 근거여야 합니다. '
                   'JSON: {"allocations":[{"code":"005930","weight":0.0,"buy_below":1.0,"valuation_basis":["판단 근거 [M1]"]}],"horizon_days":180,"summary":["종합 판단 [M1]"]}',
                   context+'\n[별도 두 역할의 의견]\n'+json.dumps(report['roles'],ensure_ascii=False))
         if not isinstance(plan,dict) or type(plan.get('horizon_days')) is not int or plan['horizon_days']<180: raise ValueError('horizon')
         allocations=plan.get('allocations');summary=plan.get('summary')
         if not isinstance(allocations,list) or len(allocations)>4 or not isinstance(summary,list) or not summary: raise ValueError('allocation schema')
         if any(c['status']!='ok' for c in check_points(summary,reg)): raise ValueError('summary citations')
-        checked=[];seen=set()
+        checked=[];seen=set();adjustments=[]
         for a in allocations:
             code=a.get('code');w=a.get('weight');p=a.get('buy_below');basis=a.get('valuation_basis')
             if code not in universe or code in seen or not finite(w) or not 0<=w<=.25 or not finite(p) or p<=0: raise ValueError('weight')
             seen.add(code);f=next(f for f in fundamentals if f['code']==code)
             if not isinstance(basis,list) or not basis or any(c['status']!='ok' for c in check_points(basis,reg)): raise ValueError('valuation citations')
-            if w and p>min(f['metrics']['price'],max(0,f['metrics'].get('ttm_eps') or 0)*15,f['metrics']['price']/f['metrics']['pb']*2): raise ValueError('valuation entry limit')
             rejected=any(s['stance']=='reject' for role in (thesis,critic) for s in role if s['code']==code)
-            if w and (not f['eligible'] or rejected): raise ValueError('fundamental gate')
-            checked.append({'code':code,'weight':w,'buy_below':p,'valuation_basis':basis})
+            tier='full'
+            m=f['metrics']
+            if w and (not f['eligible'] or rejected or
+                      not all(finite(m.get(k)) and m[k]>0 for k in ('price','ttm_eps','pb'))):
+                adjustments.append({'code':code,'reason':'fundamental_or_critic_block','requested_weight':w,'approved_weight':0})
+                w=0;tier='excluded'
+            elif w:
+                conservative,starter=entry_limits(f['metrics'])
+                if p>starter:
+                    adjustments.append({'code':code,'reason':'price_above_starter_limit','requested_weight':w,'approved_weight':0})
+                    w=0;tier='excluded'
+                elif p>conservative:
+                    reduced=min(w,STARTER_WEIGHT)
+                    adjustments.append({'code':code,'reason':'starter_valuation','requested_weight':w,'approved_weight':reduced})
+                    w=reduced;tier='starter'
+            checked.append({'code':code,'weight':w,'buy_below':p,'valuation_basis':basis,'entry_tier':tier})
         if sum(a['weight'] for a in checked)>.5: raise ValueError('concentration')
         sectors={}
         for a in checked:
             sec=universe[a['code']].get('sector','Unknown')
             sectors[sec]=sectors.get(sec,0)+a['weight']
         if any(w>.3 for w in sectors.values()):raise ValueError('concentration')
-        report.update(status='approved',allocations=checked,summary=summary,horizon_days=plan['horizon_days'],
-                      note='장기팀 검토 완료 · 가격·뉴스·공통 위험 한도 통과 시에만 월간 모의 리밸런싱')
+        report.update(status='approved',allocations=checked,allocation_adjustments=adjustments,
+                      summary=summary,horizon_days=plan['horizon_days'],
+                      note=('장기팀 검토 완료 · 일부 배분은 5% 기초 진입 또는 종목별 보류 · 가격·뉴스·공통 위험 한도 재확인' if adjustments else
+                            '장기팀 검토 완료 · 가격·뉴스·공통 위험 한도 통과 시에만 월간 모의 리밸런싱'))
         report['roles'].append({'name':'장기 운용 담당','summary':summary})
     except Exception as error:
         report.update(status='held',allocations=[],note='응답·근거 검증 또는 모델 호출 실패 · 추가 매수 보류')

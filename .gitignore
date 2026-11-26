@@ -65,3 +65,34 @@ company_research.pending
 paper_aggressive.json
 paper_aggressive.json.lock
 paper_aggressive.pending
+paper_intraday.json
+paper_intraday.json.lock
+paper_intraday.pending
+us_paper.json
+us_paper.json.lock
+us_paper.pending
+us_plan.json
+us_plan.json.lock
+us_plan.pending
+
+# AI ETF basket comparison account and plan (private operational data)
+paper_etf_basket.json
+paper_etf_basket.json.lock
+paper_etf_basket.pending
+paper_etf_basket_plan.json
+paper_etf_basket_plan.json.lock
+paper_etf_basket_plan.pending
+
+# Runtime data and caches (generated while running, not source)
+paper_shadow_v2.json
+paper_shadow_v2.json.lock
+paper_shadow_v2.pending
+short_intraday_review.json
+short_intraday_review.json.lock
+short_intraday_review.pending
+breaking_news.json
+base_rate_cache.json
+us_index_close_cache.json
+scheduler_pause.json
+service_notice.json
+*.before-evidence-backfill

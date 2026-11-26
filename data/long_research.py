@@ -122,10 +122,10 @@ def normalize_fundamentals(code,periods,balance,price,now,currency='KRW',spec=No
         result['missing']=[str(e)[:60]]
     return result
 
-def collect_fundamentals(now,universe=None):
+def collect_fundamentals(now,universe=None,dart_key=None):
     universe=UNIVERSE if universe is None else universe
     import yfinance as yf
-    out=[]
+    out=[];raw_inputs={}
     for code,spec in universe.items():
         try:
             t=yf.Ticker(spec['symbol']);inc=t.quarterly_income_stmt;cf=t.quarterly_cashflow;bs=t.quarterly_balance_sheet
@@ -138,12 +138,17 @@ def collect_fundamentals(now,universe=None):
                       'fcf':val(cf,'Free Cash Flow',c)} for c in columns]
             c=columns[0]
             bal={'date':str(c.date()),'debt':val(bs,'Total Debt',c),'equity':val(bs,'Stockholders Equity',c),'shares':val(bs,'Ordinary Shares Number',c)}
+            raw_inputs[code]={'periods':periods,'balance':bal}
             info=t.get_info();price=info.get('regularMarketPrice')
             out.append(normalize_fundamentals(code,periods,bal,price,now,info.get('financialCurrency'),spec=spec))
             out[-1]['sector']=spec.get('sector','Unknown')
-            if spec.get('sector') in ('Financial Services','Unknown'):
-                out[-1]['eligible']=False
-                out[-1].setdefault('missing',[]).append('업종별 추가 자료 검증 필요 · 자동 매수 제외')
         except Exception:
             out.append({'code':code,'name':spec['name'],'status':'unavailable','eligible':False,'metrics':{},'missing':['provider_unavailable'],'collected_at':now.isoformat()})
+    if dart_key:
+        from data.dart_financials import verify_batch
+        out=verify_batch(out,raw_inputs,dart_key,now)
+    for f in out:
+        if f.get('sector') in ('Financial Services','Unknown'):
+            f['eligible']=False
+            f.setdefault('missing',[]).append('업종별 추가 자료 검증 필요 · 자동 매수 제외')
     return out

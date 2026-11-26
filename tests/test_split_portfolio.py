@@ -79,6 +79,23 @@ def test_public_portfolio_whitelist():
     assert set(('portfolio_mode','sleeves','realized_pnl','unrealized_pnl','day_pnl','day_return_pct','valuation_audit'))<=set(_PAPER_FIELDS)
 
 
+def test_public_short_sale_includes_only_matching_recorded_review():
+    state=fresh(NOW)
+    sold_at=NOW.isoformat(timespec='seconds')
+    state['trades']=[{'at':sold_at,'sleeve':'short','ticker':INVERSE,'side':'sell',
+                      'qty':10,'price':3900,'fee':6,'realized_pnl':-100,
+                      'reason':'시간별 지수 재검토 · 방향 불일치로 청산'}]
+    state['short_reviews']=[{'at':sold_at,'verdict':'현금','index_move_pct':0.2823,
+                             'reason':'최근 지수 흐름 불일치·불분명',
+                             'observations':[{'value':1234}]}]
+    trade=summary(state)['recent_trades'][0]
+    assert trade['decision_review']=={'index_move_pct':0.2823,'verdict':'현금',
+                                      'reason':'최근 지수 흐름 불일치·불분명'}
+    assert 'observations' not in trade['decision_review']
+    state['short_reviews'][0]['at']=(NOW+timedelta(seconds=1)).isoformat(timespec='seconds')
+    assert 'decision_review' not in summary(state)['recent_trades'][0]
+
+
 def test_profit_audit_reconciles_costs_and_today_return():
     d=tick(fresh(NOW),signal(),quotes(),NOW)
     sm=summary_at(d,NOW+timedelta(minutes=5))

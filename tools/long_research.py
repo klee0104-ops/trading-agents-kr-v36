@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 import argparse
+import os
 from tools.paper_portfolio import locked,write
 from memory.long_report import load
 
@@ -12,21 +13,31 @@ def cycle(path,portfolio_path,now,client_factory=None,expanded=False,short_names
     held=set(t for b in portfolio.get('sleeves',{}).values() for t in b.get('holdings',{}))
     old_news=state.get('news',{})
     universe=None
+    dart_key=None
     if expanded:
-        from data.long_universe import update_catalog,choose_batch
+        from data.long_universe import update_catalog,choose_batch,BATCH_LIMIT
         from data.long_research import UNIVERSE
         catalog=update_catalog(state.get('catalog'),now,held,short_names)
         instruments={**UNIVERSE,**catalog.get('instruments',{})}
         long_held=set(portfolio.get('sleeves',{}).get('long',{}).get('holdings',{}))
         # Every holding must be reviewed before any portfolio replacement. Up to five companies per batch.
-        extras=choose_batch(catalog.get('watchlist',[]),(),catalog.get('review_history',{}),3)
-        catalog['next_batch']=list(dict.fromkeys(sorted(long_held)+extras))[:5]
+        remaining=max(0,BATCH_LIMIT-len(long_held))
+        extras=choose_batch(catalog.get('watchlist',[]),(),catalog.get('review_history',{}),remaining)
+        catalog['next_batch']=list(dict.fromkeys(sorted(long_held)+extras))[:BATCH_LIMIT]
         universe={c:instruments[c] for c in catalog['next_batch'] if c in instruments}
         state['catalog']=catalog
         active=set(universe)|held|{f['code'] for f in (state.get('report') or {}).get('fundamentals',[])}
         news_codes=list(dict.fromkeys(sorted(held)+[f['code'] for f in (state.get('report') or {}).get('fundamentals',[])]+sorted(active)))
         news_universe={c:instruments[c] for c in news_codes if c in instruments}
         write(path,state)
+        if os.environ.get('TA_HARNESS_OFFLINE') != '1':
+            from data.dart_disclosures import poll
+            from security.secret_store import get_api_key
+            dart_key=get_api_key('dart')
+            state['dart_financial_required']=bool(dart_key)
+            watched=set(catalog.get('watchlist',[]))|long_held|set(universe)
+            state['dart']=poll(now,watched,dart_key,state.get('dart'))
+            write(path,state)
     news=collect_news(now,held,news_universe) if expanded else collect_news(now,held)
     if news['status']=='unavailable':news['events']=old_news.get('events',[])
     state['news']=news
@@ -45,8 +56,18 @@ def cycle(path,portfolio_path,now,client_factory=None,expanded=False,short_names
           else now.date()>datetime.fromisoformat(model_at).date()))
     due=due and state.get('last_candidate_attempt_day')!=str(now.date())
     data_gap=any(f.get('status') in ('insufficient','unavailable') for f in state.get('fundamentals',[]))
-    if (due or data_gap) and state.get('fundamentals_checked_day')!=str(now.date()):
-        state['fundamentals']=collect_fundamentals(now,universe) if expanded else collect_fundamentals(now);state['fundamentals_checked_day']=str(now.date());write(path,state)
+    # A newly selected batch needs its own data, even if the previous batch was
+    # checked earlier today. This does not reopen the daily model-call budget.
+    batch_changed=bool(expanded and universe and
+                       set(universe)!=set(f.get('code') for f in state.get('fundamentals',[])))
+    dart_due=bool(expanded and dart_key and universe and
+                  state.get('dart_financial_checked_day')!=str(now.date()))
+    if (due or data_gap or dart_due or batch_changed) and (state.get('fundamentals_checked_day')!=str(now.date()) or dart_due or batch_changed):
+        state['fundamentals']=(collect_fundamentals(now,universe,dart_key=dart_key) if expanded and dart_key
+                               else collect_fundamentals(now,universe) if expanded else collect_fundamentals(now))
+        state['fundamentals_checked_day']=str(now.date())
+        if expanded and dart_key:state['dart_financial_checked_day']=str(now.date())
+        write(path,state)
     if due:
         state['last_candidate_attempt_day']=str(now.date())
         if expanded and state['catalog'].get('status')=='ok':
@@ -83,6 +104,27 @@ def cycle(path,portfolio_path,now,client_factory=None,expanded=False,short_names
         elif ready:
             state['report']={'status':'held','generated_at':now.isoformat(),'fundamentals':facts,'note':'모델 사용 불가 · 장기 매수 보류','calls':0}
         write(path,state)
+    # The medium analyst shares collected evidence but has its own one-call daily budget.
+    # Reserve the attempt durably before constructing a client so a crash cannot retry it.
+    from agents.medium_team import eligible,run_team as run_medium
+    from memory.medium_report import candidate_facts
+    facts=candidate_facts(state,now)
+    medium_ready=('medium' in portfolio.get('sleeves',{}) and client_factory is not None and news.get('status')=='ok' and
+                  any(eligible(f) for f in facts) and
+                  (not expanded or (state.get('catalog') or {}).get('status')=='ok'))
+    if medium_ready and state.get('last_medium_attempt_day')!=str(now.date()):
+        state['last_medium_attempt_day']=str(now.date())
+        write(path,state)
+        reviewed=set((state.get('medium_report') or {}).get('reviewed_news_ids') or [])
+        pending=[n for n in state['alerts'] if n.get('id') not in reviewed]
+        medium_news={**news,'events':list({n['id']:n for n in pending+news['events']+state['alerts']}.values())}
+        try:
+            state['medium_report']=run_medium(client_factory(),facts,medium_news,now)
+        except Exception:
+            state['medium_report']={'schema':1,'team':'medium','status':'held',
+                                    'generated_at':now.isoformat(),'calls':0,
+                                    'reason_code':'model_unavailable'}
+        write(path,state)
     from memory.research_reports import archive_long
     archive_long(state,path.parent/'research_reports.json',now)
     return state
@@ -111,10 +153,13 @@ def main():
             picks=(outcome.get('final_result') or {})
             names={r.get('name') for k in ('core_stocks','watch_stocks') for r in picks.get(k,[])}
             state=cycle(path,Path(Config.PAPER_PORTFOLIO_PATH),kst_now(),real_client,expanded=True,short_names=names)
+        from memory.long_report import public_summary
+        gate_counts=public_summary(state,kst_now()).get('gate_counts',[])
         status='updated';code=0
     except Exception:code=1
     log=path.parent/'logs';log.mkdir(exist_ok=True)
-    write(log/'long_research_status.json',{'at':kst_now().isoformat(),'status':status})
+    write(log/'long_research_status.json',{'at':kst_now().isoformat(),'status':status,
+                                          'gate_counts':gate_counts if status=='updated' else []})
     print('Long research: '+status)
     return code
 

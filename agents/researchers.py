@@ -66,18 +66,53 @@ def _build_user_prompt(analyst_report: dict, transcript: list[dict]) -> str:
     if transcript:
         lines.append("\n[지금까지의 토론]")
         for turn in transcript:
-            ev = ("; 근거: " + ", ".join(turn.get("evidence", []))) if turn.get("evidence") else ""
-            lines.append(f"- {turn['stance'].upper()}: {turn['argument']}{ev}")
+            ev = ("; 근거: " + ", ".join(str(e) for e in turn.get("evidence", []))) if turn.get("evidence") else ""
+            lines.append(f"- {str(turn.get('stance', '')).upper()}: {turn.get('argument', '')}{ev}")
 
     lines.append("\n위 내용을 참고해 당신의 입장에서 다음 발언을 제시하세요.")
     return "\n".join(lines)
 
 
+def normalize_turn(raw, stance: str) -> dict:
+    """(V3.31) 토론 발언 형식을 코드로 고정한다.
+    stance 는 호출한 쪽(bull/bear)으로 강제하고, evidence 는 비어 있지 않은 문자열 목록만 남긴다.
+    LLM 이 stance 를 빼거나 'Bull'·'낙관'으로 쓰거나, evidence 를 문자열/객체로 주면
+    집계·QA·중재 단계가 조용히 어긋나거나(KeyError) 멈추던 문제를 막는다."""
+    turn = dict(raw) if isinstance(raw, dict) else {}
+    issues = []
+    if turn.get("stance") != stance:
+        issues.append(f"stance={turn.get('stance')!r}")
+    turn["stance"] = stance
+    ev = turn.get("evidence")
+    if isinstance(ev, str):
+        ev = [ev] if ev.strip() else []
+        issues.append("evidence 가 문자열")
+    elif not isinstance(ev, list):
+        if ev is not None:
+            issues.append(f"evidence 형식={type(ev).__name__}")
+        ev = []
+    cleaned = []
+    for e in ev:
+        if isinstance(e, str) and e.strip():
+            cleaned.append(e.strip())
+        elif e is not None:
+            issues.append("evidence 항목 형식 오류")
+    turn["evidence"] = cleaned
+    arg = turn.get("argument")
+    turn["argument"] = arg.strip() if isinstance(arg, str) else ""
+    if not isinstance(raw, dict):
+        issues.append("응답이 객체가 아님")
+    if issues:
+        print(f"[토론 응답 형식 보정 · {stance}] " + ", ".join(dict.fromkeys(issues)))
+        turn["format_fixed"] = list(dict.fromkeys(issues))
+    return turn
+
+
 def run_bull(llm: LLMClient, analyst_report: dict, transcript: list[dict]) -> dict:
     prompt = _build_user_prompt(analyst_report, transcript)
-    return llm.complete_json(BULL_SYSTEM_PROMPT, prompt, max_tokens=900)
+    return normalize_turn(llm.complete_json(BULL_SYSTEM_PROMPT, prompt, max_tokens=900), "bull")
 
 
 def run_bear(llm: LLMClient, analyst_report: dict, transcript: list[dict]) -> dict:
     prompt = _build_user_prompt(analyst_report, transcript)
-    return llm.complete_json(BEAR_SYSTEM_PROMPT, prompt, max_tokens=900)
+    return normalize_turn(llm.complete_json(BEAR_SYSTEM_PROMPT, prompt, max_tokens=900), "bear")

@@ -37,6 +37,16 @@ def extract_json(text: str) -> dict:
     start = text.find("{")
     if start == -1:
         raise ValueError("응답에서 JSON 시작 지점을 찾지 못했습니다: " + text[:200])
+    # (V3.31) 객체 대신 배열([{...}, {...}])만 온 경우: 예전엔 첫 원소 하나만 객체로 돌려줘 나머지가 조용히 사라졌다.
+    # 배열 전체를 {"_items": [...]} 로 감싸 돌려준다 (객체를 기대하는 호출부는 필요한 키가 없어 형식 오류로 처리).
+    arr = text.find("[")
+    if arr != -1 and arr < start and not text[:arr].strip().strip("`").strip().lower().replace("json", "").strip():
+        try:
+            items, _end = json.JSONDecoder().raw_decode(text[arr:])
+            if isinstance(items, list):
+                return {"_items": items}
+        except json.JSONDecodeError:
+            pass
 
     depth = 0
     in_string = False
@@ -63,6 +73,24 @@ def extract_json(text: str) -> dict:
                 return json.loads(candidate)
 
     raise ValueError("완결된 JSON 객체를 찾지 못했습니다 (응답이 잘렸을 수 있음)")
+
+
+# (V3.33) 외부 AI(특히 무료 등급: 입력이 서비스 개선에 쓰이고 사람이 검토할 수 있음)로 보내기 전
+# 개인정보·계좌 식별정보·비밀값을 가린다. 시장 수치(지수·가격·%)는 건드리지 않는다.
+_OUTBOUND_PATTERNS = [
+    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[이메일 가림]"),
+    (re.compile(r"\b01[016789]-\d{3,4}-\d{4}\b"), "[전화번호 가림]"),
+    (re.compile(r"\b\d{8}-\d{2}\b|\b\d{4}-\d{4}-\d{2}\b|\b\d{3}-\d{2}-\d{6}\b"), "[계좌번호 가림]"),
+    (re.compile(r"\b\d{6}-[1-4]\d{6}\b"), "[주민번호 가림]"),
+    (re.compile(r"[A-Za-z]:\\Users\\[^\\\s\"']+", re.I), "[PC 경로 가림]"),
+]
+
+
+def scrub_outbound(text) -> str:
+    t = redact(str(text or ""))  # 등록된 API 키·알려진 키 형태
+    for pat, rep in _OUTBOUND_PATTERNS:
+        t = pat.sub(rep, t)
+    return t
 
 
 class LLMClient(ABC):
@@ -106,6 +134,7 @@ class AnthropicLLMClient(LLMClient):
 
     def complete(self, system: str, user: str, max_tokens: int = 1500,
                  use_web_search: bool = False) -> str:
+        system, user = scrub_outbound(system), scrub_outbound(user)
         tools = [{"type": "web_search_20250305", "name": "web_search"}] if use_web_search else None
         kwargs = dict(
             model=self.model,
@@ -151,6 +180,7 @@ class GeminiLLMClient(LLMClient):
     def complete(self, system: str, user: str, max_tokens: int = 1500,
                  use_web_search: bool = False) -> str:
         from google.genai import types
+        system, user = scrub_outbound(system), scrub_outbound(user)
 
         use_web_search = use_web_search and self.web_search_enabled
         config = types.GenerateContentConfig(
@@ -296,8 +326,13 @@ class MockLLMClient(LLMClient):
             # (소스 자료 안의 다른 "- " 불릿까지 세면 verified_count가 부풀려짐).
             marker = "[검증할 근거 목록]"
             section = user.split(marker, 1)[1] if marker in user else user
-            evidence_lines = [l.strip("- ").strip() for l in section.split("\n") if l.strip().startswith("-")]
-            results = [{"evidence": e, "verified": True, "note": "mock: 소스에서 확인됨"} for e in evidence_lines]
+            import re as _re
+            evidence_lines = [l.strip()[1:].strip() for l in section.split("\n") if l.strip().startswith("-")]
+            results = []
+            for k, e in enumerate(evidence_lines, 1):
+                m = _re.match(r"^\((\d+)\)\s*(.*)$", e)  # (V3.31) 번호 붙은 근거 → 번호로 답함
+                results.append({"no": int(m.group(1)) if m else k, "evidence": m.group(2) if m else e,
+                                "verified": True, "note": "mock: 소스에서 확인됨"})
             return json.dumps({"results": results}, ensure_ascii=False)
         if "품질보증" in s:
             # 상위 QA

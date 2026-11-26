@@ -215,7 +215,7 @@ def test_tests_never_touch_real_ledgers():
     """pytest 를 직접 실행해도 실제 원장·기록 경로가 아닌 임시 경로를 쓴다."""
     import os
     from config import Config
-    for k in ("MEMORY_DB_PATH", "LESSONS_PATH", "PAPER_ACCOUNT_PATH", "PAPER_PORTFOLIO_PATH", "LONG_RESEARCH_PATH",
+    for k in ("MEMORY_DB_PATH", "LESSONS_PATH", "PAPER_ACCOUNT_PATH", "PAPER_PORTFOLIO_PATH", "PAPER_SHADOW_V2_PATH", "PAPER_INTRADAY_PATH", "LONG_RESEARCH_PATH",
               "REPORT_ARCHIVE_PATH", "LAST_OUTCOME_PATH", "EVENT_ARCHIVE_DB_PATH"):
         p = os.path.abspath(str(getattr(Config, k)))
         assert not p.startswith(str(ROOT) + os.sep) or "pytest" in p, (k, p)

@@ -12,14 +12,20 @@ Windows 자격 증명 관리자에 저장하세요. 프로그램이 알아서 �
 `sk-ant-...`, `AIza...` 같은 예시 값은 "키 없음"으로 처리합니다.
 
 ## 명령어
+
+미국장 읽기 전용 IEX 연결에 쓸 Alpaca **paper 전용 키**는 `python cli.py set-key alpaca_id`와 `python cli.py set-key alpaca_secret`으로 별도 보관합니다. `python cli.py key-status`에서 값은 일부도 표시하지 않습니다. 이 키로 실제 주문을 호출하는 코드는 없으며, 공개 HTML과 배포 zip에도 키·미국장 원장·분석 계획이 들어가지 않습니다. 미국장 계좌 요약 공개는 `US_PUBLIC_SUMMARY=true`를 설정했을 때만 생성되며 원시 호가·체결 추정 가격은 포함하지 않습니다. 상세 운용은 [US_MARKET.md](US_MARKET.md)를 참고하세요.
+
 | 명령 | 하는 일 |
 |---|---|
-| `python cli.py set-key gemini` | 키 입력(화면에 안 보임) → 자격 증명 관리자에 저장 |
-| `python cli.py key-status` | 키가 어디서 로드되는지, 끝 4자리만 표시 |
+| `python cli.py set-key gemini` | Gemini 키를 숨김 입력 → 자격 증명 관리자에 저장 |
+| `python cli.py set-key dart` | OpenDART 인증키 40자리를 숨김 입력 → 별도 자격 증명 항목에 저장 |
+| `python cli.py key-status` | 키 로드 여부·출처 확인 (OpenDART 값은 일부도 표시하지 않음) |
 | `python cli.py migrate-keys` | `.env`의 평문 키를 자격 증명 관리자로 옮기고 `.env`에서 삭제 |
 | `python cli.py delete-key gemini` | 저장된 키 삭제 |
 | `python cli.py check-secrets` | 프로젝트 파일에 키가 새어 있는지 검사 |
 | `python cli.py package` | `.env`·DB·예측기록·venv·`.claude`를 뺀 공유용 zip 생성 (만든 뒤 다시 검사해서 키가 있으면 zip 삭제) |
+
+OpenDART 키는 `DART_API_KEY`라는 별도 항목으로 보관합니다. 상태 화면에는 키 일부도 표시하지 않습니다. `python cli.py delete-key dart`로 해당 항목만 삭제할 수 있습니다. 키가 있으면 장기팀 예약작업의 다음 데이터 수집에서 공식 공시 목록과 구조화 재무제표를 조회합니다. 키 등록 자체가 유료 모델 호출이나 즉시 가상 주문을 실행하지는 않습니다. 공식 API 요청에는 키가 필요하지만 응답 상태·로그·공개 페이지·모의계좌 원장에 키나 키가 포함된 요청 URL을 저장하지 않습니다.
 
 ## 코드에 들어간 보호 장치
 - **SecretStr**: 키는 `print`/`repr`/f-string/JSON/pickle 어디로도 평문이 나오지 않음. SDK 클라이언트를 만드는 순간에만 `.reveal()`

@@ -81,3 +81,22 @@ def test_comparison_uses_starting_equity_and_hides_invalid_ledger(tmp_path, monk
     comparison = read_comparison(main_path, shadow_path)
     assert comparison['status'] == 'pending'
     assert comparison['experiment_period_pnl'] is None
+
+
+def test_promoted_policy_archives_shadow_comparison_without_revaluing_old_trades(tmp_path):
+    primary = tick(state(), envelope(), quotes(), NOW)
+    shadow = tick(fresh_shadow(NOW, 12_000_000), envelope(), quotes(), NOW)
+    shadow['comparison_archive'] = {
+        'at': NOW.isoformat(), 'comparable': True,
+        'primary_equity': primary['sleeves']['short']['equity'],
+        'experiment_equity': shadow['sleeves']['short']['equity'],
+    }
+    main_path, shadow_path = tmp_path / 'primary.json', tmp_path / 'aggressive.json'
+    main_path.write_text(json.dumps(primary), encoding='utf-8')
+    shadow_path.write_text(json.dumps(shadow), encoding='utf-8')
+    archived = read_comparison(main_path, shadow_path)
+    assert archived['status'] == 'archived'
+    assert archived['primary_weight_pct'] == 25
+    assert archived['experiment_weight_pct'] == 40
+    assert archived['experiment_period_pnl'] < archived['primary_period_pnl'] < 0
+    assert archived['experiment_trades'] == len(shadow['trades'])

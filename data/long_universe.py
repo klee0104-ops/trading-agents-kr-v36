@@ -5,6 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 from data.long_research import finite,UNIVERSE
 
+WATCHLIST_LIMIT = 30
+SECTOR_LIMIT = 5
+BATCH_LIMIT = 5
+
 def validate_members(rows):
     out=[];seen=set()
     for r in rows:
@@ -99,35 +103,47 @@ def collect_screens(members,now):
         return row
     with ThreadPoolExecutor(max_workers=3) as pool:return list(pool.map(one,members))
 
-def choose_watchlist(screens,previous,held,short_names,now,limit=15):
+def choose_watchlist(screens,previous,held,short_names,now,limit=WATCHLIST_LIMIT):
     by={s['code']:s for s in screens};previous=set(previous);chosen=[];counts={}
     # Holdings are monitored separately; short-term interest is a tie-break, never a buy signal.
     ranked=sorted(screens,key=lambda s:(s['status']!='research',-s['score'],s['code'] not in previous,s['name'] not in short_names,s['rank']))
     for row in ranked:
         sector=row['sector']
-        if counts.get(sector,0)>=3:continue
+        if counts.get(sector,0)>=SECTOR_LIMIT:continue
         chosen.append(row['code']);counts[sector]=counts.get(sector,0)+1
         if len(chosen)==limit:break
     return chosen
 
-def choose_batch(watchlist,held,history,limit=3):
+def choose_batch(watchlist,held,history,limit=BATCH_LIMIT):
     queue=sorted(set(watchlist)|set(held),key=lambda c:(history.get(c,''),c not in held,c))
     return queue[:limit]
+
+
+def refresh_watchlist(catalog,now,held=(),short_names=()):
+    """Apply selection policy to saved screens without refetching today's 100 stocks."""
+    screens=catalog.get('screens',[])
+    if len(screens)!=100:return catalog
+    previous=catalog.get('watchlist',[])
+    watch=choose_watchlist(screens,previous,held,short_names,now)
+    catalog['watchlist']=watch
+    change={'at':now.isoformat(),'added':sorted(set(watch)-set(previous)),
+            'removed':sorted(set(previous)-set(watch)),
+            'reason':'업종별 조사 필터·업종당 최대 5개·조사 후보 최대 30개·기존 후보 안정성 우선'}
+    if change['added'] or change['removed']:catalog.setdefault('changes',[]).append(change)
+    catalog['changes']=catalog.get('changes',[])[-52:]
+    return catalog
 
 def update_catalog(old,now,held=(),short_names=(),fetcher=fetch_members,screener=collect_screens):
     from copy import deepcopy
     out=deepcopy(old or {})
-    if out.get('attempt_day')==str(now.date()) and out.get('status')=='ok':return out
+    if out.get('attempt_day')==str(now.date()) and out.get('status')=='ok':
+        return refresh_watchlist(out,now,held,short_names)
     out['attempt_day']=str(now.date())
     try:
         universe=fetcher(now);universe['members']=validate_members(universe['members']);screens=screener(universe['members'],now)
         if len(screens)!=100 or {s['code'] for s in screens}!={m['code'] for m in universe['members']}:raise ValueError('Incomplete screen')
-        previous=out.get('watchlist',[]);watch=choose_watchlist(screens,previous,held,short_names,now)
-        out.update(universe=universe,screens=screens,watchlist=watch,status='ok',checked_at=now.isoformat())
-        change={'at':now.isoformat(),'added':sorted(set(watch)-set(previous)),'removed':sorted(set(previous)-set(watch)),
-                'reason':'업종별 조사 필터·업종당 최대 3개·기존 관심 목록 안정성 우선'}
-        if change['added'] or change['removed']:out.setdefault('changes',[]).append(change)
-        out['changes']=out.get('changes',[])[-52:]
+        out.update(universe=universe,screens=screens,status='ok',checked_at=now.isoformat())
+        refresh_watchlist(out,now,held,short_names)
         retained=out.setdefault('instruments',{})
         retained.update({s['code']:{k:s[k] for k in ('name','sector','industry','symbol','aliases','related')} for s in screens})
     except Exception:out['status']='unavailable'

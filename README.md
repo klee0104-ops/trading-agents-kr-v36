@@ -40,6 +40,7 @@ CAGR/MDD/Sharpe/Sortino/Alpha/Beta/Win Rate까지 계산합니다.
 pip install -r requirements.txt
 cp .env.example .env          # LLM_PROVIDER 등 설정 (키는 적지 않음)
 python cli.py set-key gemini  # API 키를 Windows 자격 증명 관리자에 저장 (권장)
+python cli.py set-key dart    # OpenDART 인증키를 별도 항목에 저장 (숨김 입력)
 python cli.py key-status      # 키 로드 확인 (마스킹 표시)
 
 # 1) 네트워크 없이 Mock으로 파이프라인/토론 루프 동작만 확인
@@ -48,7 +49,7 @@ python cli.py demo
 # 2) 테스트 실행
 pytest tests/ -v
 
-# 3) 실제 분석 실행 (실시간 데이터 + 진짜 API 호출)
+# 3) 실시간 분석 실행 (실행 시점 데이터 수집 + 실제 API 호출, 연속 갱신 아님)
 python cli.py run
 
 # 4) 지난 예측 검증

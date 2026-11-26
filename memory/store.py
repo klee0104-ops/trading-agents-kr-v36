@@ -103,6 +103,7 @@ class PredictionRecord:
     # (V3.16) 학습: 보정 전 확률, 상황 태그, 복기용 요약(그날의 전 과정 압축), 복기 결과
     up_probability_raw: Optional[float] = None
     calibration_note: Optional[str] = None
+    consensus_score: Optional[float] = None  # 별도 코드 점수; 과거 기록은 null로 읽는다
     situation_tags: list = field(default_factory=list)
     outcome_digest: Optional[dict] = None
     postmortem: Optional[dict] = None
@@ -129,8 +130,22 @@ class MemoryStore:
         if self.path is None:
             self._in_memory_data = data
             return
-        with open(self.path, "w", encoding="utf-8") as f:
+        # (V3.31) 임시 파일에 다 쓴 뒤 교체 — 쓰는 도중 꺼지면 예측 기록 전체가 깨져 분석·채점이 멈추던 문제,
+        # 다른 프로세스(모의 계좌 tick)가 반쯤 쓴 파일을 읽던 문제를 막는다.
+        import time as _time
+        tmp = f"{self.path}.tmp{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        for attempt in range(5):
+            try:
+                os.replace(tmp, self.path)
+                return
+            except PermissionError:  # Windows: 다른 프로세스가 잠깐 열고 있으면 잠시 뒤 재시도
+                if attempt == 4:
+                    raise
+                _time.sleep(0.2 * (attempt + 1))
 
     def save(self, record: PredictionRecord):
         data = self._read()
@@ -270,9 +285,17 @@ class MemoryStore:
         값이라 다음날 결과를 기다릴 필요가 없기 때문 (Strategy Manager가 사용).
         """
         all_records = self.all_records()
-        records = [r for r in all_records if r["verified"]]
+        verified_records = [r for r in all_records if r["verified"]]
+        # A 50% rise probability has no directional edge. Keep the original
+        # prediction and settlement in the ledger, but do not call it a hit.
+        neutral = [r for r in verified_records if type(r.get("up_probability")) in (int, float)
+                   and r["up_probability"] == 50]
+        records = [r for r in verified_records if not (type(r.get("up_probability")) in (int, float)
+                                                     and r["up_probability"] == 50)]
         total = len(records)
         correct = sum(1 for r in records if r["correct"])
+        probability_records = [r for r in records if type(r.get("up_probability")) in (int, float)]
+        probability_correct = sum(1 for r in probability_records if r["correct"])
 
         by_conf: dict[str, dict] = {}
         for c in ["낮음", "보통", "높음"]:
@@ -285,7 +308,7 @@ class MemoryStore:
         # (V3.11) 종목 중재자 효과: 조정된 종목의 원래 신호가 맞았을지 vs 보합이 맞았는지
         stock_mod = {"adjusted": 0, "flat_correct": 0, "original_would_be_correct": 0,
                      "watch_total": 0, "watch_correct": 0, "core_total": 0, "core_correct": 0}
-        for r in records:
+        for r in verified_records:
             for s in r.get("stocks", []):
                 if s.get("correct") is None:
                     continue
@@ -314,7 +337,7 @@ class MemoryStore:
             b["correct"] += int(bool(r.get("correct")))
 
         by_stock: dict[str, dict] = {}
-        for r in records:
+        for r in verified_records:
             for s in r.get("stocks", []):
                 if s.get("correct") is None:
                     continue
@@ -342,11 +365,13 @@ class MemoryStore:
             b["avg_return_pct"] = (sum(returns) / len(returns)) if returns else None
 
         by_agent: dict[str, dict] = {}
-        evidence_source = all_records if include_unverified_evidence else records
+        evidence_source = all_records if include_unverified_evidence else verified_records
         for r in evidence_source:
             for a in r.get("agent_predictions", []):
                 name = a.get("agent", "unknown")
-                has_direction_score = a.get("correct") is not None and r.get("verified")
+                has_direction_score = (a.get("correct") is not None and r.get("verified")
+                                       and not (type(r.get("up_probability")) in (int, float)
+                                                and r["up_probability"] == 50))
                 has_evidence_score = a.get("evidence_total") is not None
 
                 if not has_direction_score and not has_evidence_score:
@@ -398,13 +423,20 @@ class MemoryStore:
                 b["evidence_verified"] / b["evidence_total"] if b["evidence_total"] else None
             )
 
-        returns_block = self._returns_block(records)
+        returns_block = self._returns_block(verified_records)
+        from rules.performance_evaluation import evaluate
 
         return {
             "total": total,
             "correct": correct,
             "accuracy": (correct / total) if total else None,
+            "neutral_probability_count": len(neutral),
+            "probability_total": len(probability_records),
+            "probability_correct": probability_correct,
+            "probability_accuracy": (probability_correct / len(probability_records)) if probability_records else None,
+            "legacy_direction_count": total - len(probability_records),
             "returns": returns_block,
+            "performance_evaluation": evaluate(verified_records),
             "by_confidence": by_conf,
             "by_stock": by_stock,
             "by_indicator": by_indicator,
@@ -413,7 +445,7 @@ class MemoryStore:
             "by_debate_quality": by_dq,
             "stock_moderation": stock_mod,
             "calibration": calibration([{"up_probability": r.get("up_probability"),
-                                         "actual": r.get("actual_direction")} for r in records]),
+                                         "actual": r.get("actual_direction")} for r in verified_records]),
             "by_outlook": by_outlook,
         }
 
@@ -497,8 +529,9 @@ class MemoryStore:
         agent_lines = ", ".join(agent_lines)
 
         text = (
-            f"\n[참고: 과거 예측 적중 기록 — 검증된 것만 집계]\n"
-            f"KOSPI 방향 예측 전체 적중률: {stats['correct']}/{stats['total']} ({pct}%)\n"
+            f"\n[참고: 과거 예측 방향 기록 — 검증된 것만 집계, 상승확률 50%는 중립으로 제외]\n"
+            f"KOSPI 방향 일치율: {stats['correct']}/{stats['total']} ({pct}%, "
+            f"중립 {stats['neutral_probability_count']}건 제외, 확률 미기록 {stats['legacy_direction_count']}건 포함)\n"
         )
         rb = stats.get("returns") or {}
         if rb.get("days"):

@@ -19,7 +19,9 @@
       <a href="#performance" data-tab="performance">성과·수익률</a>
       <a href="#reports" data-tab="reports">팀 보고서</a>
       <a href="#long" data-tab="long">장기 투자</a>
+      <a href="#medium" data-tab="medium">중기 투자</a>
       <a href="#paper" data-tab="paper">가상 계좌</a>
+      <a href="#us" data-tab="us">미국 모의투자</a>
       <a href="#company" data-tab="company" class="company-search-link">⌕ 기업 심층분석 검색</a>
       <a href="#backtest" data-tab="backtest">백테스트</a>
       <a href="#data" data-tab="data">데이터·이벤트</a>
@@ -29,7 +31,7 @@
       <span id="apiBadge" class="badge"><span class="dot"></span>확인 중…</span>
       <button aria-label="밝게 또는 어둡게 전환" id="btnTheme" class="btn ghost" title="밝게/어둡게">☾</button>
       <button id="btnDemo" class="btn">데모</button>
-      <button id="btnReal" class="btn primary">실제 분석 실행</button>
+      <button id="btnReal" class="btn primary" title="클릭한 시점의 최신 데이터를 수집해 한 번 분석합니다. 자동 연속 분석은 아닙니다.">실시간 분석 실행</button>
     </div>
   </div>
 </header>
@@ -42,10 +44,11 @@
       <div class="hero-main">
         <div class="card why-card" id="predictionCard">
           <h2>오늘의 KOSPI 예측</h2>
-          <div class="empty">아직 실행 결과가 없습니다. 오른쪽 위에서 데모 또는 실제 분석을 실행해보세요.</div>
+          <div class="empty">아직 실행 결과가 없습니다. 오른쪽 위에서 데모 또는 실시간 분석을 실행해보세요.</div>
         </div>
         <div class="card chart-card" id="chartCard">
-          <div class="chart-head"><span class="lbl">KOSPI</span><span class="px" id="kPx">—</span><span class="px-chg" id="kChg"></span><span class="lbl" id="kDate"></span></div>
+          <div class="chart-head"><span class="lbl">KOSPI</span><span class="px" id="kPx">—</span><span class="px-chg" id="kChg"></span><span class="lbl" id="kDate"></span><button type="button" class="chart-refresh" id="btnRefreshKospi" aria-label="KOSPI 지수 새로고침">↻ 지수 새로고침</button></div>
+          <div class="chart-refresh-status" id="kospiRefreshStatus" role="status" aria-live="polite"></div>
           <div id="kChart"><div class="empty">KOSPI 차트를 불러오는 중…</div></div>
           <div class="chart-legend"><span><i style="background:var(--chart-price)"></i>종가</span><span><i class="sw20"></i>20일선</span><span><i class="sw60"></i>60일선</span><span><i style="background:var(--up);height:8px;width:8px;border-radius:50%"></i>AI 예측 방향 (확률은 위 예측 카드 · 지수 등락률 아님)</span></div>
           <div class="ind-row" id="indRow"></div>
@@ -76,7 +79,8 @@
 <div class="card"><h2>AI vs 단순 규칙</h2><div id="baselineBox" class="empty">표시할 데이터가 없습니다.</div></div>
 <div class="card"><h2>에이전트별 성과</h2><div id="agentBox" class="empty">표시할 데이터가 없습니다.</div></div>
 <div class="card"><h2>예측 기록</h2><div id="reviewHistory"></div><div id="historyBox" class="empty">표시할 데이터가 없습니다.</div></div>
-</section><section class="tab-panel" id="tab-reports"><div class="card"><h2>투자팀 리서치 라이브러리</h2><div id="reportLibrary"></div></div></section><section class="tab-panel" id="tab-long"><div class="card"><h2>장기 투자팀 보고서</h2><div id="longResearch"></div></div></section><section class="tab-panel" id="tab-paper"><div class="card"><h2>가상 계좌 · 모의투자</h2><div id="paperBox" class="empty">표시할 데이터가 없습니다.</div><div id="paperCompare"></div></div>
+</section><section class="tab-panel" id="tab-reports"><div class="card"><h2>투자팀 리서치 라이브러리</h2><div id="reportLibrary"></div></div></section><section class="tab-panel" id="tab-long"><div class="card"><h2>장기 투자팀 보고서</h2><div id="longResearch"></div></div></section><section class="tab-panel" id="tab-medium"><div class="card"><h2>중기 투자팀 보고서</h2><div id="mediumResearch"></div></div></section><section class="tab-panel" id="tab-paper"><div class="card"><h2>가상 계좌 · 모의투자</h2><div id="manualPaperControls" class="audit-note" hidden><h3>수동 강제 모의체결</h3><p>로컬 관리자 전용 · AI·QA 승인 매매와 별도 기록 · 실제 주문 없음</p><label>단기 ETF <select id="manualPaperCode"><option value="069500">KODEX 200 (069500)</option><option value="114800">KODEX 인버스 (114800)</option></select></label> <label>단기 계좌 비중 <select id="manualPaperWeight"><option value="0.05">5%</option><option value="0.10">10%</option></select></label> <button id="manualPaperBuy" class="btn" type="button">매수 미리보기</button> <button id="manualPaperSell" class="btn" type="button">보유분 전량 매도 미리보기</button><p id="manualPaperStatus" role="status">장중 최신 시세로 미리보기를 만든 뒤 확인해야 체결됩니다.</p></div><div id="paperBox" class="empty">표시할 데이터가 없습니다.</div><div id="paperCompare"></div></div>
+</section><section class="tab-panel" id="tab-us"><div class="card"><h2>미국 모의투자 <span class="h2-sub">별도 USD 계좌 · IEX 단일 거래소 시세 · 실제 주문 없음</span></h2><div id="usPaperBox" class="empty">미국 가상계좌가 아직 시작되지 않았습니다.</div></div>
 </section><section class="tab-panel" id="tab-backtest"><div class="card"><h2>백테스트 · 과거 데이터 참고치</h2><div id="backtestBox" class="empty">표시할 데이터가 없습니다.</div></div>
 </section><section class="tab-panel" id="tab-data"><div class="card"><h2>변동성 이벤트 아카이브</h2>
 <div class="event-controls"><label for="eventStockSelect">종목</label><select id="eventStockSelect"><option value="">종목 선택…</option></select><button id="btnRefreshEvents" class="btn">새로고침</button></div>

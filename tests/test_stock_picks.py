@@ -32,7 +32,7 @@ def test_apply_reviews_only_keep_or_flat():
     hd = out["watch_stocks"][0]
     assert hd["directional_signal"] == "flat" and hd["moderated"] and hd["original_signal"] == "down"
     assert out["watch_stocks"][1]["directional_signal"] == "up" and not out["watch_stocks"][1]["moderated"]
-    assert out["stock_moderation"] == {"reviewed": 2, "adjusted_to_flat": 1}
+    assert out["stock_moderation"] == {"reviewed": 2, "matched": 2, "adjusted_to_flat": 1}  # (V3.31) 매칭 수 추가
 
 
 def test_flat_scoring_threshold():

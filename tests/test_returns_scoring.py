@@ -1,4 +1,5 @@
 from dataclasses import asdict
+import json
 from memory.store import MemoryStore, PredictionRecord, AgentPrediction
 
 
@@ -39,3 +40,25 @@ def test_mark_verified_scores_returns_and_stats():
     assert isinstance(rb["ai_beats_buy_hold"], bool)
     assert m.foreign_flow_history() == [1000.0, 1000.0, 1000.0]
     assert "수익률(포지션 기준" in m.build_history_context_text()
+
+
+def test_winning_only_history_is_strict_json_for_dashboard(tmp_path, monkeypatch):
+    from config import Config
+    from web.server import app
+
+    path = tmp_path / "memory.json"
+    monkeypatch.setattr(Config, "MEMORY_DB_PATH", str(path))
+    monkeypatch.setattr(Config, "LESSONS_PATH", str(tmp_path / "lessons.json"))
+    memory = MemoryStore(str(path))
+    memory.save(_rec("2026-09-21", "up", 70, 0.4))
+    memory.mark_verified("2026-09-21", "up", actual_change_pct=1.0,
+                         etf_returns={"long": 0.9})
+
+    response = app.test_client().get("/api/history", headers={"Host": f"127.0.0.1:{Config.WEB_PORT}"})
+    assert response.status_code == 200
+
+    def reject_constant(value):
+        raise ValueError(f"Non-JSON number: {value}")
+
+    body = json.loads(response.get_data(as_text=True), parse_constant=reject_constant)
+    assert body["stats"]["returns"]["ai"]["profit_factor"] is None

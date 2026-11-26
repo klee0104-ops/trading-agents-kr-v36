@@ -63,5 +63,8 @@ def detect_conflicts(risk_assessment: dict, final_result: dict,
         unverified_total = sum(len(r.get("unverified", [])) for r in debate_qa)
         if unverified_total > 0:
             reasons.append(f"토론 단계에서 근거 검증 실패가 {unverified_total}건 있었습니다.")
+        unknown_total = sum(len(r.get("qa_unknown") or []) for r in debate_qa if isinstance(r, dict))
+        if unknown_total > 0:  # (V3.31) 판정 불가는 실패와 따로 센다 — 상위 QA 는 계속 돌린다(보수적)
+            reasons.append(f"토론 근거 {unknown_total}건은 QA 응답 대조 실패로 판정하지 못했습니다(사실 여부 미정).")
 
     return {"conflict": len(reasons) > 0, "reasons": reasons}

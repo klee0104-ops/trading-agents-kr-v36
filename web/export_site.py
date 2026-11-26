@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
 import html
 from datetime import datetime
@@ -67,6 +69,20 @@ def _redact_deep(obj, cores: list[str]):
 _PERF_KEYS = ("days", "total_return_pct", "sharpe_annual", "max_drawdown_pct", "win_rate", "traded_days", "equity_curve_pct")
 
 
+def _evaluation_public(evaluation) -> dict | None:
+    if not isinstance(evaluation, dict):
+        return None
+    allowed = {
+        "direction": ("total", "correct", "accuracy_pct", "wilson_95_pct", "neutral_excluded",
+                      "legacy_excluded", "record_conflicts", "sample_sufficient"),
+        "calibration": ("total", "brier", "coin_flip_brier"),
+        "matched_etf": ("days", "first_date", "last_date", "ai_net_return_pct",
+                        "always_long_net_return_pct", "excess_percentage_points", "cost_bps_roundtrip",
+                        "missing_or_invalid_excluded", "duplicate_date_excluded"),
+    }
+    return {name: _pick(evaluation.get(name) or {}, fields) for name, fields in allowed.items()}
+
+
 def _returns_public(rb) -> dict | None:
     """수익률 블록에서 공개 가능한 요약만 (곡선 포함, 날짜별 개별 수익은 제외)."""
     if not rb or not rb.get("days"):
@@ -79,15 +95,98 @@ def _returns_public(rb) -> dict | None:
     return out
 
 
-_PAPER_FIELDS = ("execution_alignment", "days", "initial_cash", "equity", "pnl", "total_return_pct", "day_pnl", "day_return_pct", "valuation_audit", "sharpe_annual",
+_PAPER_FIELDS = ("execution_alignment", "leverage_review", "leverage_waiting", "leverage_summary", "capital_events", "days", "initial_cash", "equity", "pnl", "total_return_pct", "day_pnl", "day_return_pct", "valuation_audit", "last_complete_valuation", "exposure_history", "sharpe_annual",
                  "max_drawdown_pct", "win_rate", "trades", "fees", "equity_curve", "recent_days",
                  "cash", "holdings", "recent_trades", "portfolio_mode", "sleeves", "last_tick", "created_at", "realized_pnl", "unrealized_pnl", "gross_exposure", "net_direction_exposure", "hedged")
 _COMPARISON_FIELDS = ("started_at", "last_tick", "status", "primary_weight_pct", "experiment_weight_pct", "primary_base_equity", "experiment_base_equity", "primary_period_pnl", "experiment_period_pnl", "primary_period_return_pct", "experiment_period_return_pct", "experiment_trades", "primary_total_trades")
+_SHADOW_V2_FIELDS = ("status", "started_at", "start_date", "last_tick", "trading_days", "minimum_days", "primary_return_pct", "shadow_return_pct", "primary_max_drawdown_pct", "shadow_max_drawdown_pct", "primary_fills", "shadow_fills", "shadow_average_exposure_pct", "direction_accuracy_pct", "brier", "exact_fifty_ratio_pct", "criteria_met", "note")
+_OPPORTUNITY_FIELDS = ("status", "date", "short_trades", "no_trade_reason", "observations", "valid_observations")
+_INTRADAY_FIELDS = ("label", "initial_cash", "last_tick", "status", "review_reason", "analysis_source", "valuation_status", "equity", "total_pnl", "realized_pnl", "unrealized_pnl", "cash", "holdings", "orders", "fills")
+_BASKET_FIELDS = ("label", "initial_cash", "cash", "status", "valuation_status", "last_tick", "equity", "return_pct", "benchmark_equity", "benchmark_return_pct", "holdings", "plan", "active_plan_id", "executed_at", "trades", "equity_history")
+_BASKET_PLAN_FIELDS = ("status", "qa_reason", "created_at", "target_date", "evidence_date", "positions", "cash_weight_pct", "evidence_summary")
+_BASKET_POSITION_FIELDS = ("code", "name", "role", "weight_pct", "reason", "source_ids", "analysis")
+_BASKET_ANALYSIS_FIELDS = ("price_reading", "allocation_thesis", "countercase")
+_BASKET_EVIDENCE_FIELDS = ("source_id", "date", "basis", "retrieved_at", "first_close", "last_close", "change_pct", "range_pct", "up_sessions", "down_sessions")
+
+
+def _public_basket_evidence(evidence, evidence_date):
+    import math
+
+    if not isinstance(evidence, dict):
+        return {}
+    source_ids = {"069500": "M701", "379800": "M702", "132030": "M703", "488770": "M704"}
+    result = {}
+    for code, expected_id in source_ids.items():
+        row = evidence.get(code)
+        if (not isinstance(row, dict) or row.get("source_id") != expected_id
+                or row.get("date") != evidence_date
+                or row.get("basis") not in ("generation_input", "rechecked_after_creation")):
+            continue
+        numbers = ("first_close", "last_close", "change_pct", "range_pct", "up_sessions", "down_sessions")
+        if any(type(row.get(key)) not in (int, float) or not math.isfinite(row[key]) for key in numbers):
+            continue
+        if (row["first_close"] <= 0 or row["last_close"] <= 0 or row["range_pct"] < 0
+                or not 0 <= row["up_sessions"] <= 9 or not 0 <= row["down_sessions"] <= 9):
+            continue
+        result[code] = _pick(row, _BASKET_EVIDENCE_FIELDS)
+    return result
+
+
+def _sanitize_etf_basket(value):
+    if not isinstance(value, dict):
+        return None
+    out = _pick(value, _BASKET_FIELDS)
+    plan = out.get("plan")
+    if isinstance(plan, dict):
+        out["plan"] = _pick(plan, _BASKET_PLAN_FIELDS)
+        out["plan"]["positions"] = [_pick(row, _BASKET_POSITION_FIELDS) for row in out["plan"].get("positions", []) if isinstance(row, dict)][:4]
+        for row in out["plan"]["positions"]:
+            analysis = row.get("analysis")
+            if isinstance(analysis, dict):
+                expected_id = {"069500": "M701", "379800": "M702", "132030": "M703", "488770": "M704"}.get(row.get("code"))
+                row["analysis"] = {key: sentence for key in _BASKET_ANALYSIS_FIELDS
+                                   if isinstance((sentence := analysis.get(key)), str)
+                                   and 12 <= len(sentence) <= 240 and expected_id
+                                   and re.findall(r"\[M70[1-4]\]", sentence) == ["[" + expected_id + "]"]
+                                   and not re.search(r"<|>|https?://", sentence)
+                                   and not re.search(r"\d", re.sub(r"\[M70[1-4]\]", "", sentence))}
+            else:
+                row.pop("analysis", None)
+        out["plan"]["evidence_summary"] = _public_basket_evidence(
+            out["plan"].get("evidence_summary"), out["plan"].get("evidence_date"))
+    holdings = []
+    for row in out.get("holdings") or []:
+        if not isinstance(row, dict) or row.get("code") not in ("069500", "379800", "132030", "488770"):
+            continue
+        if type(row.get("qty")) is not int or row["qty"] <= 0:
+            continue
+        safe = _pick(row, ("code", "name", "qty"))
+        cost = row.get("invested_cost")
+        if type(cost) in (int, float) and math.isfinite(cost) and cost > 0:
+            safe["invested_cost"] = cost
+            fields = ("market_price", "market_value", "unrealized_pnl", "return_pct")
+            if (out.get("valuation_status") == "ok" and row.get("valued_at") == out.get("last_tick")
+                    and all(type(row.get(key)) in (int, float) and math.isfinite(row[key]) for key in fields)
+                    and row["market_price"] > 0 and row["market_value"] > 0
+                    and abs(row["market_value"] - row["invested_cost"] - row["unrealized_pnl"]) < 1):
+                safe.update(_pick(row, fields + ("valued_at",)))
+        holdings.append(safe)
+    out["holdings"] = holdings[:4]
+    out["trades"] = [_pick(row, ("at", "code", "side", "qty", "price", "fee", "plan_id")) for row in (out.get("trades") or []) if isinstance(row, dict)][-20:]
+    out["equity_history"] = [_pick(row, ("at", "equity", "benchmark_equity")) for row in (out.get("equity_history") or []) if isinstance(row, dict)][-80:]
+    return out
 
 
 def _long_public():
     from memory.long_report import read_public
     return read_public(Config.LONG_RESEARCH_PATH)
+
+
+def _medium_public():
+    from memory.long_report import load
+    from memory.medium_report import public_summary
+    from data.sessions import kst_now
+    return public_summary(load(Config.LONG_RESEARCH_PATH), kst_now())
 
 
 def _paper_public() -> dict | None:
@@ -111,8 +210,154 @@ def _paper_comparison():
         return None
 
 
+def _shadow_v2_public():
+    try:
+        from execution.shadow_v2 import read_comparison
+        return _pick(read_comparison(Config.PAPER_PORTFOLIO_PATH,
+                                    Config.PAPER_SHADOW_V2_PATH, Config.MEMORY_DB_PATH) or {},
+                     _SHADOW_V2_FIELDS) or None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _paper_intraday():
+    try:
+        from execution.intraday_paper import public_summary
+        return public_summary(Config.PAPER_INTRADAY_PATH)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _paper_opportunity():
+    try:
+        from execution.paper_opportunity import read_summary
+        path = Path(Config.PAPER_PORTFOLIO_PATH).parent / 'logs' / 'paper_opportunity_study.json'
+        return _pick(read_summary(path), _OPPORTUNITY_FIELDS)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _etf_basket_public():
+    try:
+        from execution.etf_basket import public_summary
+        from tools.etf_basket import _read, paths
+        account_path, plan_path = paths()
+        return public_summary(_read(account_path), _read(plan_path))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _us_paper_public():
+    # Public redistribution of a licensed quote feed is not assumed. This is
+    # an opt-in, delayed account summary with no quote prices or API calls.
+    if os.environ.get("US_PUBLIC_SUMMARY", "false").lower() != "true":
+        return None
+    try:
+        from tools.us_paper import _read, paths
+        from us_market.ledger import public_summary
+        account_path, _ = paths()
+        return public_summary(_read(account_path))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def _pick(d: dict, keys) -> dict:
     return {k: d.get(k) for k in keys if d.get(k) is not None}
+
+
+def _sanitize_intraday(value):
+    if not isinstance(value, dict):
+        return None
+    result = _pick(value, _INTRADAY_FIELDS)
+    for key, fields in (("holdings", ("code", "qty")),
+                        ("orders", ("id", "code", "side", "qty", "filled_qty", "status")),
+                        ("fills", ("at", "code", "side", "qty", "price", "price_model"))):
+        result[key] = [_pick(item, fields) for item in (value.get(key) or [])[-5:]
+                       if isinstance(item, dict) and item.get("code") in ("069500", "114800")]
+    return result or None
+
+
+def _sanitize_us_paper(value):
+    if not isinstance(value, dict) or value.get("currency") != "USD":
+        return None
+    valuation = value.get("valuation") or {}
+    result = _pick(value, ("currency", "initial_cash", "last_tick", "cash", "realized_pnl", "feed_note"))
+    result["valuation"] = _pick(valuation, ("status", "equity", "pnl", "return_pct", "at"))
+    result["holdings"] = [_pick(h, ("sleeve", "symbol", "qty")) for h in (value.get("holdings") or [])[:12]
+                          if isinstance(h, dict) and h.get("symbol") in ("SPY", "SH", "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN")]
+    result["recent_trades"] = [_pick(t, ("at", "sleeve", "symbol", "side", "qty", "realized_pnl"))
+                               for t in (value.get("recent_trades") or [])[-8:]
+                               if isinstance(t, dict) and t.get("symbol") in ("SPY", "SH", "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN")]
+    return result
+
+
+def _service_notices(now) -> list:
+    """(V3.40) 운영 공지(service_notice.json) — 만료 전 공지만, 긴급이슈 배너 앞에 같은 형식으로 붙인다."""
+    import json as _json
+    from pathlib import Path as _Path
+    try:
+        raw = _json.loads((_Path(__file__).resolve().parents[1] / 'service_notice.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for n in (raw.get('items') if isinstance(raw, dict) else None) or []:
+        try:
+            if datetime.fromisoformat(n['expires_at']) <= now:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        out.append({'title': str(n.get('title', ''))[:120], 'source': '시그널랩 운영 공지',
+                    'published_at': str(n.get('published_at') or now.isoformat()),
+                    'detected_at': str(n.get('published_at') or now.isoformat()),
+                    'expires_at': n['expires_at'], 'impact': 'unclear',
+                    'summary': str(n.get('summary', ''))[:80], 'kind': 'notice'})
+    return out[:2]
+
+
+def _urgent_public() -> list:
+    """(V3.35) 속보 긴급이슈 최대 3건(제목·매체·시각·AI 요약·영향). 실패하면 빈 목록. (V3.40) 운영 공지를 맨 앞에."""
+    try:
+        from data.sessions import kst_now
+        now = kst_now()
+        notices = _service_notices(now)
+        try:
+            from data.breaking_news import public_issues
+            issues = public_issues(Config.BREAKING_NEWS_PATH, now)
+        except Exception:  # noqa: BLE001
+            issues = []
+        return (notices + issues)[:3]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _public_analysts(reports: dict) -> dict:
+    """Publish only checked notable points as the analyst card summary.
+
+    The LLM summary is not itself passed through check_points, so displaying it
+    as a verified synopsis can attribute claims to unrelated citation IDs.
+    This changes presentation only; trading and vote decisions keep their input.
+    """
+    result = {}
+    for name, report in (reports or {}).items():
+        if not isinstance(report, dict):
+            continue
+        check = report.get("citation_check") or {}
+        points = [str(p) for p in (report.get("notable_points") or [])]
+        verified = points if report.get("citation_ok") is True and check.get("valid") == len(points) else []
+        concise = [p.split(" — 출처:", 1)[0] for p in verified[:2]]
+        result[name] = {
+            "direction": report.get("direction") if verified else None,
+            "confidence": report.get("confidence") if verified else "낮음",
+            "summary": " ".join(concise) if concise else "검증을 통과한 세부 근거가 없어 판단을 보류합니다.",
+            "points": verified[:12],
+            "citation_check": {"valid": len(verified), "total": check.get("total", len(points))},
+        }
+    return result
+
+
+def _public_source_registry(registry: list[dict]) -> list[dict]:
+    from rules.citations import public_registry
+    return public_registry(registry)
 
 
 def build_snapshot_data() -> dict:
@@ -142,6 +387,45 @@ def build_snapshot_data() -> dict:
     today_base = {k: v.get("direction") for k, v in (o.get("baselines") or {}).items()} \
         or baseline_predictions(latest.get("us_indices", []))
     sn = o.get("snapshot") or {}
+    us_rows = list(sn.get("us_indices") or [])
+    macro_rows = list(sn.get("macro") or [])
+    us_session = next((q.get("as_of") for q in us_rows if q.get("as_of")), None)
+    input_quality_note = None
+    if us_rows:
+        try:
+            from data.market_data import MarketDataProvider
+            checked = MarketDataProvider().fetch_us_snapshot()
+            by_name = {q.name: q for q in checked.us_indices}
+            by_macro = {q.name: q for q in checked.macro}
+            # 보관된 AI 입력의 종가와 동일한 거래일에만 등락률 표시를 정정한다.
+            same_closes = len(by_name) == len(us_rows) and all(
+                q.get("name") in by_name and q.get("value") is not None
+                and abs(float(q["value"]) - by_name[q["name"]].value) < 0.01
+                for q in us_rows)
+            if same_closes:
+                us_session = checked.us_indices[0].as_of
+                if any(abs(float(q.get("change_pct") or 0) - by_name[q["name"]].change_pct) > 0.05
+                       for q in us_rows):
+                    us_rows = [{**q, "change_pct": by_name[q["name"]].change_pct,
+                                "as_of": by_name[q["name"]].as_of} for q in us_rows]
+                    input_quality_note = ("미국 지수의 누락된 전일 종가를 복구해 등락률 표시를 정정했습니다. "
+                                          "AI 예측은 정정 전 입력으로 생성됐으므로 근거와 확률을 주의해서 보세요.")
+            checked_macro = []
+            macro_held = False
+            for q in macro_rows:
+                current = by_macro.get(q.get("name"))
+                if current and q.get("value") is not None and abs(float(q["value"]) - current.value) < 0.001:
+                    checked_macro.append({**q, "change_pct": current.change_pct})
+                else:
+                    checked_macro.append({**q, "change_pct": None})
+                    macro_held = True
+            macro_rows = checked_macro
+            if macro_held:
+                input_quality_note = ((input_quality_note + " ") if input_quality_note else "") + "전일 종가가 확인되지 않은 보조 지표의 등락률은 보류했습니다."
+        except Exception:
+            us_rows = [{**q, "change_pct": None} for q in us_rows]
+            macro_rows = [{**q, "change_pct": None} for q in macro_rows]
+            input_quality_note = "미국 지수의 전일 종가를 재검증하지 못해 등락률 표시를 보류했습니다."
     kh = o.get("kospi_history")
     # (V3.22) KOSPI 차트·현재 지수는 페이지를 만드는 시점의 최신 시세로 갱신한다(Yahoo 누락분은 네이버로 보충).
     # 분석 당시 값이 누락된 채 저장돼 있으면(예: 9/28 −2.70% 빠짐) 차트가 옛 날짜에서 끝나 '상승'처럼 보이던 문제.
@@ -171,23 +455,37 @@ def build_snapshot_data() -> dict:
                       "kr_flow": live.kr_flow}
         except Exception as e:  # noqa: BLE001
             print(f"[공유 페이지] 시세 보충 실패(무시): {e}")
+    if not us_rows and sn.get("us_indices"):
+        us_rows = list(sn["us_indices"])
+    if not macro_rows and sn.get("macro"):
+        macro_rows = list(sn["macro"])
     cores = _news_cores(o.get("news_titles"))
     data = {
         "inputs": {
             "as_of": sn.get("as_of"),
-            "us": [_pick(q, ("name", "change_pct", "value")) for q in (sn.get("us_indices") or [])],
-            "macro": [_pick(q, ("name", "change_pct", "value")) for q in (sn.get("macro") or [])],
+            "us": [_pick(q, ("name", "change_pct", "value", "as_of")) for q in us_rows],
+            "us_as_of": us_session,
+            "macro": [_pick(q, ("name", "change_pct", "value")) for q in macro_rows],
             "kr_flow": _pick(sn.get("kr_flow") or {}, ("date", "foreign_net_krw_bn", "direction", "strong")) or None,
         },
         "target_date": o.get("target_date") or latest.get("target_date"),
         "baselines_today": {k: {"label": BASELINES[k], "direction": d} for k, d in today_base.items() if k in BASELINES},
         "baseline_compare": stats.get("baseline_compare"),
         "returns": _returns_public(stats.get("returns")),
+        "performance_evaluation": _evaluation_public(stats.get("performance_evaluation")),
         "long_research": _long_public(),
+        "medium_research": _medium_public(),
         "paper": _paper_public(),  # User-authorized simulated returns and trades.
+        "paper_opportunity": _paper_opportunity(),
         "paper_comparison": _paper_comparison(),
+        "paper_shadow_v2": _shadow_v2_public(),
+        "paper_intraday": _paper_intraday(),
+        "etf_basket": _etf_basket_public(),
+        "urgent_issues": _urgent_public(),
+        "us_paper": _us_paper_public(),
         "generated_at": datetime.now().isoformat(timespec="minutes"),
         "analysis_at": last.get("saved_at"),
+        "input_quality_note": input_quality_note,
         "prediction": {
             "direction": pred.get("direction"),
             "confidence": pred.get("confidence"),
@@ -211,6 +509,9 @@ def build_snapshot_data() -> dict:
         ][:10],
         "qa": {
             "bull": qa_sum["bull"], "bear": qa_sum["bear"],
+            # (V3.31) QA 응답 대조 실패로 판정하지 못한 근거 수 — '자료에 없음'과 구분해 표시
+            "unknown": {k: sum(len(r.get("qa_unknown") or []) for r in dq if isinstance(r, dict) and r.get("stance") == k)
+                        for k in ("bull", "bear")},
             "risk_stage_passed": v.get("verification_passed"),
             "final_risk_level": v.get("final_risk_level"),
             "final_consistent": f.get("consistent"),
@@ -218,7 +519,8 @@ def build_snapshot_data() -> dict:
             "regime": _pick(ma, ("regime_trend", "regime_volatility", "risk_level_hint")),
         },
         "risk": _pick(risk, ("risk_level", "recommended_confidence", "summary")),
-        "analysts": {n: _pick(r, ("direction", "confidence", "summary")) for n, r in (o.get("analyst_reports") or {}).items()},
+        "analysts": _public_analysts(o.get("analyst_reports") or {}),
+        "source_registry": _public_source_registry(o.get("source_registry") or []),
         "news_universe": [str(u.get("name")) for u in (o.get("news_universe") or [])],
         "stock_rank": {str(u.get("name")): u.get("rank") for u in (o.get("news_universe") or []) if u.get("rank")},
         "stock_moderation": fr.get("stock_moderation"),
@@ -227,6 +529,11 @@ def build_snapshot_data() -> dict:
                                                          "agreed_facts", "key_disputes", "noise")),
         "stats": {
             "total": stats.get("total"), "correct": stats.get("correct"), "accuracy": stats.get("accuracy"),
+            "neutral_probability_count": stats.get("neutral_probability_count"),
+            "probability_total": stats.get("probability_total"),
+            "probability_correct": stats.get("probability_correct"),
+            "probability_accuracy": stats.get("probability_accuracy"),
+            "legacy_direction_count": stats.get("legacy_direction_count"),
             "by_confidence": stats.get("by_confidence"),
             "by_agent": {k: _pick(a, ("total", "correct", "accuracy", "evidence_total", "evidence_verified",
                                        "evidence_verify_rate", "contribution"))
@@ -246,13 +553,15 @@ def build_snapshot_data() -> dict:
         ],
     }
     # 뉴스 원문(제목)은 공유본에 싣지 않는다: 토론 근거/분석가 요약/중재 정리에 문장째 인용된 것은 가린다.
-    for key in ("debate", "analysts", "moderation", "prediction"):
+    for key in ("debate", "analysts", "source_registry", "moderation", "prediction"):
         data[key] = _redact_deep(data[key], cores)
     from memory.research_reports import sync_latest
     from data.sessions import kst_now
     from tools.company_research import read_public as company_public
-    data['company_research']=company_public(Config.COMPANY_RESEARCH_PATH,Config.LONG_RESEARCH_PATH)
+    data['company_research']=company_public(Config.COMPANY_RESEARCH_PATH,Config.LONG_RESEARCH_PATH,Config.LAST_OUTCOME_PATH)
     data['research_reports']=sync_latest(Config.REPORT_ARCHIVE_PATH,Config.LAST_OUTCOME_PATH,Config.LONG_RESEARCH_PATH,kst_now())
+    from execution.paper_activity import summarize as paper_activity
+    data['paper_activity']=paper_activity(o,data['paper'],data['long_research'],kst_now())
     return data
 
 
@@ -300,9 +609,11 @@ h1{margin:0;font-size:22px;letter-spacing:-.01em;text-wrap:balance}
 .aihead{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-top:14px;font-size:12.5px;color:var(--ink-2)}.aihead b{color:var(--ink)}
 .kchart .mid{stroke:var(--muted);stroke-dasharray:4 4;stroke-width:1}.kchart .ailine{fill:none;stroke:var(--muted);stroke-width:1.5}
 .kchart .m-hit{fill:var(--good);stroke:var(--panel);stroke-width:2}.kchart .m-wait{fill:var(--panel);stroke:var(--ink-2);stroke-width:2}
+.kchart .m-neutral{fill:var(--panel);stroke:var(--accent);stroke-width:2.5}
 .kchart .m-miss{stroke:var(--warn);stroke-width:2.5;stroke-linecap:round;fill:none}
 .legend i.lg-hit{background:var(--good);border-radius:50%;width:9px;height:9px;border:0}
 .legend i.lg-wait{border:2px solid var(--ink-2);border-radius:50%;width:9px;height:9px;background:transparent}
+.legend i.lg-neutral{border:2px solid var(--accent);border-radius:50%;width:9px;height:9px;background:var(--panel)}
 .legend i.lg-miss{font-style:normal;color:var(--warn);font-weight:700;background:none;width:auto;height:auto;border:0}
 .clk{font-size:12px;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
 .stale{margin:12px 0;padding:10px 14px;border:1px solid var(--warn);border-radius:10px;color:var(--warn);font-size:13px}
@@ -345,6 +656,8 @@ th{font-weight:500;color:var(--muted);font-size:12px} td.num,th.num{text-align:r
 .chg.up{color:var(--up)} .chg.down{color:var(--down)} .chg.flat{color:var(--muted)}
 .chart-head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
 .chart-head .px{font-size:30px;font-weight:700} .chart-head .lbl{color:var(--muted);font-size:12.5px}
+.chart-refresh{margin-left:auto;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink-2);font:inherit;font-size:12px;font-weight:650;cursor:pointer}
+.chart-refresh:hover{border-color:var(--accent);color:var(--ink)} .chart-refresh:disabled{opacity:.55;cursor:wait}
 .kchart{width:100%;height:auto;display:block}
 .kchart .g{stroke:var(--line)} .kchart .ax{fill:var(--muted);font-size:11px;font-family:"IBM Plex Mono",monospace}
 .kchart .price{fill:none;stroke:var(--ink);stroke-width:1.8} .kchart .ma20{fill:none;stroke:var(--warn);stroke-width:1.1} .kchart .ma60{fill:none;stroke:var(--accent);stroke-width:1.1}
@@ -385,7 +698,7 @@ section>*,.hero-card>*,#pred>*,#ret>*,#paper>*,.panel>*{min-width:0}
 @media (max-width:1000px){.hero-3{grid-template-columns:minmax(0,1fr)}.board{position:static}}
 @media (max-width:820px){.grid{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:640px){
-  body{font-size:15px;padding-bottom:calc(66px + env(safe-area-inset-bottom))}
+  body{font-size:15px;padding-bottom:calc(112px + env(safe-area-inset-bottom))}
   .wrap{padding-inline:12px;padding-block:14px 24px;gap:14px}
   .panel.active{gap:14px}
   .topbar{overflow:hidden}.topbar-inner{padding:8px 12px;gap:8px;flex-wrap:nowrap;max-width:100vw}
@@ -396,7 +709,7 @@ section>*,.hero-card>*,#pred>*,#ret>*,#paper>*,.panel>*{min-width:0}
   .ro{display:none}.clk{font-size:10.5px}
   .btn{padding:6px 9px;font-size:12px;flex:0 0 auto}
   /* 하단 고정 탭바 (앱처럼) */
-  .tabs{position:fixed;left:0;right:0;bottom:0;z-index:30;display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:0;
+  .tabs{position:fixed;left:0;right:0;bottom:0;z-index:30;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;
     background:var(--panel);border-top:1px solid var(--line);padding:4px 2px calc(4px + env(safe-area-inset-bottom));order:0;width:auto}
   .tabs a{display:flex;flex-direction:column;align-items:center;gap:1px;padding:6px 0;border-radius:8px;font-size:11px;color:var(--muted)}
   .tabs a i{display:block;font-style:normal;font-size:17px;line-height:1.1}
@@ -447,7 +760,7 @@ section>*,.hero-card>*,#pred>*,#ret>*,#paper>*,.panel>*{min-width:0}
 
 
 .pnl{font-variant-numeric:tabular-nums;font-weight:750}.pnl-profit{color:var(--up)!important}.pnl-loss{color:var(--down)!important}.pnl-neutral{color:var(--ink-2,var(--text-secondary))!important}
-.paper-total{padding:24px!important;border-radius:20px!important}.paper-total .pnl{font-size:21px}.paper-sleeve{padding:22px;line-height:1.75;border:1px solid var(--line,var(--border));border-radius:20px;background:var(--panel,var(--surface-1))}.paper-sleeve-long{border-top:4px solid #39c996;background:linear-gradient(145deg,#23a67612,transparent)}
+.paper-total{padding:24px!important;border-radius:20px!important}.paper-total .pnl{font-size:21px}.paper-sleeve{padding:22px;line-height:1.75;border:1px solid var(--line,var(--border));border-radius:20px;background:var(--panel,var(--surface-1))}.paper-sleeve-long{border-top:4px solid #39c996;background:linear-gradient(145deg,#23a67612,transparent)}.paper-sleeve-medium{border-top:4px solid #27b59a;background:linear-gradient(145deg,#27b59a16,transparent)}.paper-sleeve-core{border-top:4px solid #4f8ee8;background:linear-gradient(145deg,#4f8ee816,transparent)}
 .long-research{--long-accent:#62dfb1;--long-soft:#1da87512;display:grid;gap:12px}.long-research>.audit-note{border:1px solid #39c99666;border-left:5px solid #39c996;border-radius:20px;padding:24px;background:linear-gradient(125deg,#1da8751c,transparent)}.long-research>.audit-note>b{font-size:20px;color:var(--long-accent)}.long-research h3{color:var(--long-accent);font-size:20px;border-left:3px solid #39c996;padding-left:12px;margin:26px 0 4px}.long-research .watch-item{border-radius:18px;border-color:#39c99640;background:var(--long-soft);padding:20px}.long-research .watch-item>b{font-size:17px}.long-research .watch-item small{line-height:1.9}.long-research .tbl{border-radius:16px;overflow:hidden}.long-research th{background:var(--long-soft)}
 :root[data-theme="light"] .long-research{--long-accent:#08764f;--long-soft:#eaf7f1}.long-research p{line-height:1.8}
 @media(max-width:600px){.paper-total{padding:18px!important}.paper-total .pnl{font-size:18px}.long-research>.audit-note{padding:18px}.paper-sleeve{padding:18px}}
@@ -493,6 +806,14 @@ h2{font-size:20px;font-weight:700;letter-spacing:-.02em}
 .why-dir{font-size:42px;font-weight:800;letter-spacing:-.03em;line-height:1.15}
 .toss-lead{font-size:18px;color:var(--ink-2);font-weight:500;margin-top:-4px}
 .hero-card .chip,.chip{font-size:15px;padding:7px 14px;border:0;background:var(--panel-2);color:var(--ink)}
+.confidence-help{position:relative;display:inline-flex;vertical-align:middle}
+.confidence-trigger{font:inherit;cursor:pointer}
+.confidence-trigger:hover,.confidence-trigger:focus-visible{color:var(--accent);outline:2px solid var(--accent);outline-offset:2px}
+.confidence-popover{display:none;position:absolute;right:0;top:calc(100% + 10px);z-index:30;width:min(360px,88vw);box-sizing:border-box;padding:16px 18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:0 12px 36px rgba(0,0,0,.25);color:var(--ink-2);font-size:13px;line-height:1.55;text-align:left;white-space:normal}
+.confidence-popover span{display:block;margin-top:8px}.confidence-popover strong,.confidence-popover b{color:var(--ink)}
+.confidence-help.is-open .confidence-popover{display:block}
+@media (hover:hover){.confidence-help:hover .confidence-popover{display:block}}
+@media (max-width:640px){.confidence-popover{position:fixed;left:16px;right:16px;top:auto;bottom:16px;width:auto;max-height:65vh;overflow-y:auto}}
 .evidence{gap:10px}
 .evidence li{font-size:16px;padding:14px 16px;border:0;border-radius:16px;grid-template-columns:28px 1fr}
 .evidence .n{font-size:14px;font-weight:700;color:var(--accent)}
@@ -518,6 +839,24 @@ details.more>summary:hover{color:var(--ink)}
   .kpi .v{font-size:24px}.kpi{padding:16px}
   .brand small{display:none}
 }
+.home-guide{border:1px solid var(--line);background:linear-gradient(130deg,var(--panel),var(--panel-2));gap:14px}
+.home-guide h2{font-size:22px}.home-guide p{margin:0;color:var(--ink-2)}
+.home-guide-links{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.home-guide-links a{display:grid;gap:4px;text-decoration:none;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:14px;min-width:0}
+.home-guide-links a:hover,.home-guide-links a:focus-visible{border-color:var(--accent);outline:2px solid var(--accent);outline-offset:2px}
+.home-guide-links b{font-size:14px}.home-guide-links small{color:var(--muted);font-size:12px;line-height:1.4}
+.architecture-intro{gap:20px}.architecture-intro>p{margin:0;color:var(--ink-2)}
+.architecture-map{list-style:none;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0;padding:0}
+.architecture-map li{position:relative;display:grid;align-content:start;gap:7px;min-width:0;border:1px solid var(--line);background:var(--panel-2);border-radius:16px;padding:16px}
+.architecture-map li:not(:last-child)::after{content:'→';position:absolute;right:-14px;top:40%;z-index:1;color:var(--good);font-weight:800}
+.architecture-map em{font-style:normal;color:var(--good);font-size:12px;font-weight:700}.architecture-map b{font-size:15px}.architecture-map small{font-size:12px;color:var(--ink-2);line-height:1.5}
+.architecture-teams{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.architecture-teams article{border:1px solid var(--line);border-radius:16px;padding:18px;background:var(--bg)}
+.architecture-teams b{color:var(--good)}.architecture-teams p{margin:8px 0 0;color:var(--ink-2);font-size:13px}
+.architecture-intro details{border-top:1px solid var(--line);padding-top:14px}.architecture-intro summary{cursor:pointer;font-weight:700}
+.architecture-intro details p{color:var(--ink-2);font-size:14px;margin:12px 0 0}
+@media(max-width:900px){.home-guide-links{grid-template-columns:repeat(2,minmax(0,1fr))}.architecture-map{grid-template-columns:1fr}.architecture-map li:not(:last-child)::after{content:'↓';right:50%;top:auto;bottom:-17px}.architecture-teams{grid-template-columns:1fr}}
+@media(max-width:640px){.home-guide-links a:last-child{grid-column:1/-1}.architecture-intro{padding:20px 18px}}
 """
 
 _JS = r"""
@@ -527,7 +866,29 @@ _JS = r"""
   function dir(d){return d==='up'?'<span class="up">▲ 상승</span>':d==='down'?'<span class="down">▼ 하락</span>':'—';}
   function frac(a,b){return b?(a+'/'+b+' ('+Math.round(a/b*100)+'%)'):'—';}
   function $(id){return document.getElementById(id);}
-  var p=D.prediction||{}, st=D.stats||{};
+  function confidenceHelp(pred){
+    var n=Number(pred.up_probability), value=pred.up_probability!=null&&isFinite(n)?n.toFixed(1).replace(/\.0$/,'')+'%':'미기록';
+    return '<span class="confidence-help"><button type="button" class="chip confidence-trigger" data-confidence-trigger aria-expanded="false" aria-controls="confidence-explainer">신뢰도 '+esc(pred.confidence||'-')+' <span aria-hidden="true">ⓘ</span></button>'+
+      '<span class="confidence-popover" id="confidence-explainer" role="note"><strong>신뢰도 평가 기준</strong>'+
+      '<span>AI 상승 확률이 50%에서 얼마나 떨어졌는지에 따른 <b>예측 강도</b>입니다. 과거 적중률이나 모의투자 수익률을 뜻하지 않습니다.</span>'+
+      '<span><b>낮음</b> 45% 이상 ~ 55% 미만 · 보합권</span>'+
+      '<span><b>보통</b> 30% 이상 ~ 45% 미만 또는 55% 이상 ~ 70% 미만</span>'+
+      '<span><b>높음</b> 30% 미만 또는 70% 이상</span>'+
+      '<span>이번 예측: 상승 확률 '+esc(value)+' → 신뢰도 '+esc(pred.confidence||'-')+'</span>'+
+      (pred.calibration_note?'<span>확률 보정: '+esc(pred.calibration_note)+'</span>':'')+'</span></span>';
+  }
+  if(typeof document.addEventListener==='function') document.addEventListener('click',function(event){
+    var trigger=event.target.closest&&event.target.closest('[data-confidence-trigger]');
+    var openHelp=document.querySelector('.confidence-help.is-open');
+    if(openHelp&&(!trigger||!openHelp.contains(trigger))){openHelp.classList.remove('is-open');openHelp.querySelector('[data-confidence-trigger]').setAttribute('aria-expanded','false');}
+    if(trigger){var help=trigger.closest('.confidence-help'),open=help.classList.toggle('is-open');trigger.setAttribute('aria-expanded',String(open));}
+  });
+  if(typeof document.addEventListener==='function') document.addEventListener('keydown',function(event){
+    if(event.key!=='Escape')return;
+    var help=document.querySelector('.confidence-help.is-open');
+    if(help){help.classList.remove('is-open');help.querySelector('[data-confidence-trigger]').setAttribute('aria-expanded','false');}
+  });
+  var p=D.prediction||{}, st=D.stats||{}, neutralToday=p.up_probability===50;
   var AL={TechnicalAnalyst:'기술적',MacroFlowAnalyst:'거시·수급',SemiconductorAnalyst:'반도체',NewsSentimentAnalyst:'뉴스·심리',MarketAnalyst:'통합(다수결)'};
 
   $('asof').textContent = D.analysis_at ? D.analysis_at.replace('T',' ') : '없음';
@@ -548,9 +909,10 @@ _JS = r"""
   $('tgt').textContent = D.target_date || '-';
 
   var k=[];
-  k.push(['오늘 KOSPI 예측', p.direction?(p.outlook_label?'<span class="'+(p.direction==='up'?'up':'down')+'">'+esc(p.outlook_label)+'</span>':dir(p.direction)):'—',
+  k.push(['오늘 KOSPI 예측', neutralToday?'중립 · 방향 우위 없음':p.direction?(p.outlook_label?'<span class="'+(p.direction==='up'?'up':'down')+'">'+esc(p.outlook_label)+'</span>':dir(p.direction)):'—',
     p.up_probability!=null?('상승 확률 '+Math.round(p.up_probability)+'%'):(p.confidence?('신뢰도 '+esc(p.confidence)):'분석 기록 없음')]);
-  k.push(['누적 적중률', st.total?(Math.round(st.accuracy*100)+'%'):'—', (st.correct||0)+'/'+(st.total||0)+'건 검증']);
+  k.push(['확률 기반 방향 일치', st.probability_total?(Math.round(st.probability_accuracy*100)+'%'):'—',
+    (st.probability_correct||0)+'/'+(st.probability_total||0)+'건 · 50% 중립 '+(st.neutral_probability_count||0)+'건 제외']);
   var q=D.qa||{};
   k.push(['Bull 근거 검증', q.bull&&q.bull[1]?Math.round(q.bull[0]/q.bull[1]*100)+'%':'—', q.bull?frac(q.bull[0],q.bull[1]):'']);
   k.push(['Bear 근거 검증', q.bear&&q.bear[1]?Math.round(q.bear[0]/q.bear[1]*100)+'%':'—', q.bear?frac(q.bear[0],q.bear[1]):'']);
@@ -566,7 +928,9 @@ _JS = r"""
     kq='<div class="kq '+cc(kc)+'"><div class="nm"><span>KOSPI '+esc(KH0.dates[KH0.dates.length-1])+' 종가</span><span>전일 '+fv(kp)+'</span></div><div class="px mono">'+fv(kl)+'</div><div class="ch mono">'+pct(kc)+' ('+(kl-kp).toFixed(2)+')</div></div>';}
   if(liveQuote){kq='<div class="kq '+cc(liveQuote.change_pct)+'"><div class="nm"><span>KOSPI '+esc(liveQuote.date)+(liveQuote.intraday?' 장중':' 종가')+'</span><span>전일 '+fv(liveQuote.prev)+'</span></div><div class="px mono">'+fv(liveQuote.value)+'</div><div class="ch mono">'+pct(liveQuote.change_pct)+' ('+(liveQuote.value-liveQuote.prev).toFixed(2)+')</div><div class="ev">시세 기준 '+esc(liveQuote.traded_at)+' · '+esc(liveQuote.source)+'</div></div>';}
   $('board').innerHTML='<h2>시장 현황 <span class="h2-sub">'+(liveQuote?'KOSPI 시세 갱신':inp0.as_of?'분석 당시 · '+esc(inp0.as_of):'')+'</span></h2>'+kq+
-    '<div class="grp">참고 미국 지수 · 분석 당시 '+esc(inp0.as_of||'')+'</div><table>'+(inp0.us||[]).map(brow).join('')+'</table>'+
+    '<div class="grp">참고 미국 지수 · 분석 당시 '+esc(inp0.us_as_of||inp0.as_of||'')+' 미국장 종가</div>'+
+    (D.input_quality_note?'<p class="ev">'+esc(D.input_quality_note)+'</p>':'')+
+    '<table>'+(inp0.us||[]).map(brow).join('')+'</table>'+
     ((inp0.macro||[]).length?'<div class="grp">거시 지표</div><table>'+(inp0.macro||[]).map(brow).join('')+'</table>':'')+
     (function(){var f=D.public_flow||inp0.kr_flow,live=!!D.public_flow;
       if(!f||f.foreign_net_krw_bn==null)return '<div class="grp">외국인 수급</div><div class="ev">데이터 없음 · 다음 갱신에서 재시도</div>';
@@ -589,18 +953,19 @@ _JS = r"""
   var RS=D.risk||{}; if(RS.risk_level)votes.push('<span class="vote">리스크 '+esc(RS.risk_level)+'</span>');
   var prob=p.up_probability!=null?Math.round(p.up_probability):null;
   $('pred').innerHTML = p.direction ?
-    '<div class="why-dir '+(p.direction==='up'?'up':'down')+'">'+(p.outlook_label?esc(p.outlook_label):dir(p.direction))+'</div>'+
-    '<div>'+(prob!=null?'<span class="chip">상승 확률 <b class="mono">'+prob+'%</b></span> ':'')+'<span class="chip">신뢰도 '+esc(p.confidence||'-')+'</span> <span class="chip">대상 거래일 '+esc(D.target_date||'-')+'</span></div>'+
+    '<div class="why-dir '+(neutralToday?'':p.direction==='up'?'up':'down')+'">'+(neutralToday?'중립 · 방향 우위 없음':p.outlook_label?esc(p.outlook_label):dir(p.direction))+'</div>'+
+    '<div>'+(prob!=null?'<span class="chip">상승 확률 <b class="mono">'+prob+'%</b></span> ':'')+confidenceHelp(p)+' <span class="chip">대상 거래일 '+esc(D.target_date||'-')+'</span></div>'+
     (prob!=null?'<div><div class="gauge"><div class="needle" style="left:'+prob+'%"></div></div><div class="gauge-lbl mono"><span>하락 확신</span><span>50</span><span>상승 확신</span></div></div>':'')+
     (p.position_reason?'<div class="ev"><b>포지션</b> '+esc(p.position_reason)+(D.realized_vol!=null?' · 실현변동성 '+D.realized_vol+'%':'')+'</div>':'')+
     (p.calibration_note?'<div class="ev">확률 보정: '+esc(p.calibration_note)+'</div>':'')+
+    (D.input_quality_note?'<p class="ev">'+esc(D.input_quality_note)+'</p>':'')+
     '<div class="label">왜 이렇게 판단했나</div><ol class="evidence">'+(p.reasoning||[]).map(function(r,i){var f=mf(r);return '<li><span class="n mono">'+String(i+1).padStart(2,'0')+'</span><span>'+esc(r)+(f.length?'<span class="fact mono">데이터: '+f.map(esc).join(' · ')+'</span>':'')+'</span></li>';}).join('')+'</ol>'+
     (votes.length?'<div class="label">에이전트 판단</div><div class="votes">'+votes.join('')+'</div>':'')+
     ((D.lessons_used||[]).length?'<div class="ev"><b>복기 교훈 참고</b> '+D.lessons_used.map(function(r){return esc(r.target_date)+': '+esc(r.lesson||'');}).join(' · ')+'</div>':'')+
     '<div class="ev"><a href="#process" style="color:var(--accent)">분석 과정 전체 보기 →</a></div>'
     : '<div class="empty">아직 분석 결과가 없습니다.</div>';
 
-  if(p.direction)$('pred').innerHTML=predictionComparison(p.direction,D.public_quote,D.target_date,'pt')+$('pred').innerHTML;
+  if(p.direction&&!neutralToday)$('pred').innerHTML=predictionComparison(p.direction,D.public_quote,D.target_date,'pt')+$('pred').innerHTML;
 
   function aiTrack(recs,W,pl,pr){
     // 최근 기록(최대 20건)을 날짜순으로 같은 간격에 놓는다(지수 차트와 별도 축). y = AI 상승확률.
@@ -619,9 +984,10 @@ _JS = r"""
     var xl=pts.map(function(q,k){return (k%step===0||k===m-1)?'<text class="ax" x="'+q.x.toFixed(1)+'" y="'+(H2-8)+'" text-anchor="middle">'+esc(q.d.slice(5))+'</text>':'';}).join('');
     var g='';[0,50,100].forEach(function(v){g+='<line class="'+(v===50?'mid':'g')+'" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+Y2(v).toFixed(1)+'" y2="'+Y2(v).toFixed(1)+'"/><text class="ax" x="'+(W-pr+6)+'" y="'+(Y2(v)+4).toFixed(1)+'">'+v+'%'+(v===50?' 중립':'')+'</text>';});
     var ln=pts.length>1?'<path class="ailine" d="'+pts.map(function(q,i){return (i?'L':'M')+q.x.toFixed(1)+','+Y2(q.v).toFixed(1);}).join(' ')+'"/>':'';
-    var mk=pts.map(function(q){var r=q.r,x=q.x.toFixed(1),y=Y2(q.v).toFixed(1),scored=r.verified===true&&typeof r.correct==='boolean',st=scored?(r.correct?'hit':'miss'):'wait';
+    var mk=pts.map(function(q){var r=q.r,x=q.x.toFixed(1),y=Y2(q.v).toFixed(1),neutral=r.verified===true&&q.v===50,scored=r.verified===true&&typeof r.correct==='boolean'&&!neutral,st=neutral?'neutral':scored?(r.correct?'hit':'miss'):'wait';
       var tip=q.d+' AI 상승확률 '+Math.round(q.v)+'% ('+(q.v===50?'중립':q.v>50?'상승':'하락')+' 예측)'+
-        (scored?(' → 실제 '+(r.actual_direction==='up'?'상승':r.actual_direction==='down'?'하락':r.actual_direction==='flat'?'보합':'방향 미기록')+(typeof r.actual_change_pct==='number'&&isFinite(r.actual_change_pct)?' '+pct(r.actual_change_pct):'')+' · '+(r.correct?'적중':'빗나감')+
+        (neutral?(' → 실제 '+(r.actual_direction==='up'?'상승':r.actual_direction==='down'?'하락':'방향 미기록')+(typeof r.actual_change_pct==='number'&&isFinite(r.actual_change_pct)?' '+pct(r.actual_change_pct):'')+' · 방향 채점 제외'):
+         scored?(' → 실제 '+(r.actual_direction==='up'?'상승':r.actual_direction==='down'?'하락':r.actual_direction==='flat'?'보합':'방향 미기록')+(typeof r.actual_change_pct==='number'&&isFinite(r.actual_change_pct)?' '+pct(r.actual_change_pct):'')+' · '+(r.correct?'적중':'빗나감')+
           (typeof r.strategy_return_pct==='number'&&isFinite(r.strategy_return_pct)?' · 전략 '+pct(r.strategy_return_pct):'')):' → 채점 대기');
       var shape=st==='miss'?'<path class="m-miss" d="M'+(q.x-5).toFixed(1)+','+(Y2(q.v)-5).toFixed(1)+'l10,10m0,-10l-10,10"/>':'<circle class="m-'+st+'" cx="'+x+'" cy="'+y+'" r="5"/>';
       q.tip=tip;
@@ -631,7 +997,7 @@ _JS = r"""
     return head+note+
       '<svg class="kchart" viewBox="0 0 '+W+' '+H2+'" role="group" aria-label="AI 상승확률 기록 '+pts.length+'건">'+g+
       ln+mk+lab+xl+'</svg>'+
-      '<div class="legend"><span><i class="lg-hit"></i>적중</span><span><i class="lg-miss">×</i>빗나감</span><span><i class="lg-wait"></i>채점 대기</span><span>점을 누르거나 올리면 실제 결과</span></div>'+
+      '<div class="legend"><span><i class="lg-hit"></i>방향 일치</span><span><i class="lg-miss">×</i>방향 불일치</span><span><i class="lg-neutral"></i>50% 중립·채점 제외</span><span><i class="lg-wait"></i>채점 대기</span></div>'+
       '<div class="aitip" id="aiTip" aria-live="polite">'+esc(lastp.tip)+'</div>';
   }
   var KH=D.kospi_history;
@@ -644,7 +1010,7 @@ _JS = r"""
     var g='';for(var k=0;k<=4;k++){var v=lo+(hi-lo)*k/4;g+='<line class="g" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+Y(v).toFixed(1)+'" y2="'+Y(v).toFixed(1)+'"/><text class="ax" x="'+(W-pr+6)+'" y="'+(Y(v)+4).toFixed(1)+'">'+Math.round(v).toLocaleString()+'</text>';}
     var xl=[0,Math.floor(n/2),n-1].map(function(i){return '<text class="ax" x="'+X(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="'+(i===0?'start':i===n-1?'end':'middle')+'">'+esc((dt[i]||'').slice(5))+'</text>';}).join('');
     var last=cl[n-1],prev=liveQuote?liveQuote.prev:(cl[n-2]||last),chg=(last/prev-1)*100,pr2='';
-    if(p.direction){var up=p.direction==='up',x=X(n-1)-12,y=Math.max(pt+16,Math.min(H-pb-8,Y(last)+(up?-26:26))),c=up?'var(--up)':'var(--down)';
+    if(p.direction&&!neutralToday){var up=p.direction==='up',x=X(n-1)-12,y=Math.max(pt+16,Math.min(H-pb-8,Y(last)+(up?-26:26))),c=up?'var(--up)':'var(--down)';
       pr2='<text class="ax ai-direction" x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" text-anchor="end" style="fill:'+c+';font-weight:700;paint-order:stroke;stroke:var(--panel);stroke-width:4;stroke-linejoin:round">AI '+(up?'▲':'▼')+'</text>';}
     $('kChart').innerHTML='<svg class="kchart" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="KOSPI 최근 '+n+'거래일"><defs><linearGradient id="kg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--chart-price)" stop-opacity="0.22"/><stop offset="100%" stop-color="var(--chart-price)" stop-opacity="0"/></linearGradient></defs>'+g+
       '<path fill="url(#kg)" d="'+path(cl)+' L'+X(n-1).toFixed(1)+','+(H-pb)+' L'+X(0).toFixed(1)+','+(H-pb)+' Z"/><path class="ma60" d="'+path(m60)+'"/><path class="ma20" d="'+path(m20)+'"/><path class="price" d="'+path(cl)+'"/>'+pr2+xl+'</svg>';
@@ -653,7 +1019,7 @@ _JS = r"""
     $('kDate').textContent=liveQuote?liveQuote.traded_at+(liveQuote.intraday?' 장중 (미확정)':' 종가')+' · 최근 '+n+'거래일':dt[n-1]+' 종가 · 최근 '+n+'거래일';
   }
   // AI 확률 기록은 시장 차트 데이터 유무와 무관하게 표시한다.
-  if(p.direction){$('kAi').innerHTML='AI 예측 <b class="'+(p.direction==='up'?'up':'down')+'">'+(p.direction==='up'?'▲ 상승':'▼ 하락')+'</b>'+(prob!=null?' · 상승확률 '+prob+'% <span class="ax2">(지수 등락률 아님)</span>':'');}
+  if(p.direction){$('kAi').innerHTML=neutralToday?'AI 예측 <b>중립 · 방향 우위 없음</b> · 상승확률 50%':'AI 예측 <b class="'+(p.direction==='up'?'up':'down')+'">'+(p.direction==='up'?'▲ 상승':'▼ 하락')+'</b>'+(prob!=null?' · 상승확률 '+prob+'% <span class="ax2">(지수 등락률 아님)</span>':'');}
   var trackWidth=Math.round(Math.min(720,Math.max(300,((typeof window!=='undefined'&&window.innerWidth)||1100)-(((typeof window!=='undefined'&&window.innerWidth)||1100)<700?64:96))));
   $('aiTrack').innerHTML=aiTrack(D.records||[],trackWidth,8,trackWidth<500?62:76);
   if($('aiTrack').addEventListener){['click','mouseover','focusin','keydown'].forEach(function(ev){$('aiTrack').addEventListener(ev,function(e){
@@ -714,8 +1080,11 @@ _JS = r"""
     var path=pts.map(function(p){return p.join(',');}).join(' ');
     return '<svg class="stock-line" viewBox="0 0 600 180" role="img" aria-label="'+esc(rows[0].date+'부터 '+rows[rows.length-1].date+'까지 가격 흐름')+'"><path d="M20 160H580" stroke="currentColor" opacity=".15"/><polyline points="'+path+'" fill="none" stroke="var(--chart-price)" stroke-width="'+(small?5:3)+'" stroke-linecap="round" stroke-linejoin="round"/>'+(small?'':pts.map(function(p,i){return '<circle cx="'+p[0]+'" cy="'+p[1]+'" r="4" fill="var(--chart-price)"><title>'+esc(rows[i].date+' · '+fv(rows[i].close)+'원')+'</title></circle>';}).join(''))+'</svg>';
   }
+  function latestCompanyReport(name){var list=((D.company_research||{}).reports||[]).filter(function(r){return r.name===name;});return list.length?list[list.length-1]:null;}
+  function companyCode(name){var item=((D.company_research||{}).companies||[]).find(function(c){return c.name===name;});return item?item.code:'';}
+  function companyResearchHint(name){var r=latestCompanyReport(name);if(!r)return '심층보고서 미작성';var day=String(r.generated_at||'').slice(5,10).replace('-','/');return '심층보고서 '+day+' '+(r.status==='reviewed'?'검토 완료':r.status==='held'?'자료 부족·보류':'실패');}
   function simpleStock(s){var q=(D.stock_quotes||{})[s.name]||{},idx=stockItems.indexOf(s);
-    return '<button type="button" class="stock-tile" data-stock-open="'+idx+'" aria-label="'+esc(s.name)+' 주가와 분석 상세 보기"><span class="stock-top"><span class="stock-avatar">'+esc(s.name.slice(0,1))+'</span><span><strong>'+esc(s.name)+'</strong><small>'+esc(q.code||'종목코드 확인 중')+'</small></span><span class="stock-arrow">›</span></span><span class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</span><span class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct):'—')+' <small>전일 대비</small></span>'+stockLine(stockHistory(q),true)+'<span class="stock-bottom">AI '+esc(stockForecastLabel(s))+'<small>'+(q.status==='unavailable'?'갱신 실패 · 이전 자료':esc(q.date||'자료 대기'))+'</small></span></button>';
+    return '<button type="button" class="stock-tile" data-stock-open="'+idx+'" aria-label="'+esc(s.name)+' 주가와 분석 상세 보기"><span class="stock-top"><span class="stock-avatar">'+esc(s.name.slice(0,1))+'</span><span><strong>'+esc(s.name)+'</strong><small>'+esc(q.code||companyCode(s.name)||'종목코드 확인 중')+'</small></span><span class="stock-arrow">›</span></span><span class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</span><span class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct):'—')+' <small>전일 대비</small></span>'+stockLine(stockHistory(q),true)+'<span class="stock-bottom">AI '+esc(stockForecastLabel(s))+'<small>'+(q.status==='unavailable'?'갱신 실패 · 이전 자료':esc(q.date||'시세 확인 대기')+' · '+esc(companyResearchHint(s.name)))+'</small></span></button>';
   }
   $('core').innerHTML=(D.core_stocks||[]).map(simpleStock).join('')||'<p class="empty">추천 종목을 기다리고 있어요</p>';
   $('watch').innerHTML=(D.watch_stocks||[]).map(simpleStock).join('')||'<p class="empty">추천 분석 종목을 기다리고 있어요</p>';
@@ -723,7 +1092,7 @@ _JS = r"""
   var stockTrigger=null;
   function selectedCompanyReport(name){var list=((D.company_research||{}).reports||[]).filter(function(r){return r.name===name;});return '<details class="stock-research-detail"><summary>기업 심층분석 보고서 보기</summary>'+companyReportView(list.length?list[list.length-1]:null,esc)+'</details>';}
   function showStock(index){var s=stockItems[index];if(!s)return;var q=(D.stock_quotes||{})[s.name]||{},rows=stockHistory(q);
-    detail.innerHTML='<div class="stock-detail-head"><div><small>종목 살펴보기 · '+esc(q.code||'코드 미확인')+'</small><h2 id="stockDetailTitle">'+esc(s.name)+'</h2></div><button type="button" class="detail-close" aria-label="종목 상세 닫기">×</button></div><div class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</div><p class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct)+' · 전일 대비':'현재 시세 없음')+'</p><div class="stock-period"><button type="button" data-period="5">최근 5일</button><button type="button" data-period="10" aria-pressed="true">최근 10일</button></div><div id="stockChartArea"></div><p class="ev">일별 종가 흐름 · 오늘 장중에는 마지막 값이 변동됩니다. '+esc(q.source||'출처 대기')+' · 수집 '+esc(q.checked_at||'미확인')+'</p><details class="stock-prices"><summary>날짜별 가격 보기</summary><div id="stockPriceRows"></div></details><h3>AI는 이렇게 판단했어요</h3>'+card(s)+selectedCompanyReport(s.name)+'<p class="ev">예측은 매수 지시가 아닙니다. 이 화면에서는 주문이나 AI 분석을 실행하지 않습니다.</p>';
+    detail.innerHTML='<div class="stock-detail-head"><div><small>종목 살펴보기 · '+esc(q.code||companyCode(s.name)||'코드 미확인')+'</small><h2 id="stockDetailTitle">'+esc(s.name)+'</h2></div><button type="button" class="detail-close" aria-label="종목 상세 닫기">×</button></div><div class="stock-price">'+(typeof q.value==='number'?fv(q.value)+'원':'시세 대기')+'</div><p class="'+cc(q.change_pct)+'">'+(typeof q.change_pct==='number'?pct(q.change_pct)+' · 전일 대비':'현재 시세 없음')+'</p><div class="stock-period"><button type="button" data-period="5">최근 5일</button><button type="button" data-period="10" aria-pressed="true">최근 10일</button></div><div id="stockChartArea"></div><p class="ev">일별 종가 흐름 · 오늘 장중에는 마지막 값이 변동됩니다. '+esc(q.source||'출처 대기')+' · 수집 '+esc(q.checked_at||'미확인')+'</p><details class="stock-prices"><summary>날짜별 가격 보기</summary><div id="stockPriceRows"></div></details><h3>AI는 이렇게 판단했어요</h3>'+card(s)+selectedCompanyReport(s.name)+'<p class="ev">예측은 매수 지시가 아닙니다. 이 화면에서는 주문이나 AI 분석을 실행하지 않습니다.</p>';
     function draw(count){var r=rows.slice(-count);detail.querySelector('#stockChartArea').innerHTML=stockLine(r,false)+(r.length?'<p class="stock-dates"><span>'+esc(r[0].date)+'</span><span>'+esc(r[r.length-1].date)+' · '+r.length+'개 관측값</span></p>':'');detail.querySelector('#stockPriceRows').innerHTML=r.map(function(x){return '<p class="stock-dates"><span>'+esc(x.date)+'</span><b>'+fv(x.close)+'원</b></p>';}).join('')||'자료 없음';detail.querySelectorAll('[data-period]').forEach(function(b){b.setAttribute('aria-pressed',String(Number(b.dataset.period)===count));});}
     draw(10);detail.querySelectorAll('[data-period]').forEach(function(b){b.addEventListener('click',function(){draw(Number(b.dataset.period));});});detail.querySelector('.detail-close').addEventListener('click',function(){detail.close();});detail.showModal();
   }
@@ -779,6 +1148,15 @@ _JS = r"""
     brows.map(function(b){return '<tr'+(b[3]?' style="font-weight:600"':'')+'><td>'+esc(b[0])+'</td><td class="num">'+(b[1]==='up'?'<span class="up">▲</span>':b[1]==='down'?'<span class="down">▼</span>':'—')+'</td><td class="num">'+acc(b[2])+'</td></tr>';}).join('')+
     '</tbody></table></div><div class="ev">AI가 단순 규칙보다 꾸준히 높아야 의미가 있습니다. 같은 날짜 표본으로 비교합니다.</div>';
 
+  var pe=D.performance_evaluation||{}, pd=pe.direction||{}, pc=pe.calibration||{}, pm=pe.matched_etf||{};
+  var ci=pd.wilson_95_pct;
+  $('perfAudit').innerHTML=pe.direction?'<div class="audit-note"><b>예측 품질 점검 · 가상계좌 체결 손익과 별도</b><br>'+
+    '방향 일치 '+esc(pd.correct)+'/'+esc(pd.total)+'건 · 50% 중립 '+esc(pd.neutral_excluded)+'건 제외'+
+    (ci&&ci.length===2?' · 95% 추정 범위 '+esc(ci[0])+'~'+esc(ci[1])+'%':'')+
+    ' · Brier '+esc(pc.brier==null?'—':pc.brier)+' (50% 고정 기준 0.25, 낮을수록 좋음)'+
+    (pd.sample_sufficient?' · 표본 수만으로 우위를 증명하지 못합니다.':' · 30건 미만으로 성능 결론 보류.')+'</div>'+
+    '<div class="audit-note"><b>동일 채점일 ETF 가정 비교 · 실제 계좌 손익 아님</b><br>'+
+    (pm.days?'실제 ETF 시세 '+esc(pm.days)+'일 · AI 가정 순수익 '+esc(pm.ai_net_return_pct)+'% / KODEX 200 매일 진입 '+esc(pm.always_long_net_return_pct)+'% · 양쪽 같은 왕복비용 '+esc(pm.cost_bps_roundtrip)+'bp':'비교 가능한 ETF 시세 기록 대기 · 지수 근사치로 ETF 성과를 꾸미지 않습니다.')+'</div>':'';
   var rb=D.returns||null;
   function curve(series,w,h){w=w||Math.round(Math.min(720,Math.max(300,((typeof window!=='undefined'&&window.innerWidth)||1100)-(((typeof window!=='undefined'&&window.innerWidth)||1100)<700?64:96))));h=h||(w<500?150:140);var all=[];series.forEach(function(x){all=all.concat(x.v);});if(!all.length)return '';
     var lo=Math.min.apply(null,[0].concat(all)),hi=Math.max.apply(null,[0].concat(all)),pad=6,span=(hi-lo)||1,n=Math.max.apply(null,series.map(function(x){return x.v.length;}));
@@ -808,12 +1186,21 @@ function companyReportView(r,esc){
  var metrics={price:'가격',ttm_income:'최근 12개월 순이익',ttm_fcf:'최근 12개월 잉여현금흐름',revenue_yoy_pct:'매출 전년 대비 (%)',debt_equity:'부채/자본',pb:'PBR',ttm_eps:'최근 12개월 EPS'};
  return '<article class="company-report"><p class="ev">기업 조사 · '+esc(r.generated_at)+' · '+esc(labels[r.status]||'확인 필요')+'</p><h2>'+esc(r.name)+' <small>'+esc(r.code)+'</small></h2><p>'+esc(r.note)+'</p><p class="ev">모의계좌와 독립된 조사 보고서 · 자동 매매 지시가 아닙니다.</p><h3>재무·가치평가 자료</h3>'+(r.candidates||[]).map(function(c){return '<p>결산기 '+esc(c.period_end||'미확인')+' · '+esc(c.source||'자료 없음')+'</p><div class="company-metrics">'+Object.keys(metrics).map(function(k){var v=(c.metrics||{})[k];return '<div><small>'+metrics[k]+'</small><b>'+(typeof v==='number'&&isFinite(v)?v.toLocaleString(undefined,{maximumFractionDigits:2}):'자료 없음')+'</b></div>';}).join('')+'</div><p class="ev">부족한 자료: '+esc((c.missing||[]).join(', ')||'보고된 누락 없음')+'</p>';}).join('')+'<h3>분석가와 반대 검토</h3>'+((r.roles||[]).map(function(role){return '<section><h4>'+esc(role.name)+'</h4>'+(role.stocks||[]).map(function(s){return '<p>'+esc(({consider:'검토 가능',watch:'관찰',reject:'반대'})[s.stance]||s.stance)+'</p><ul>'+(s.points||[]).map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul><b>판단을 다시 검토할 조건</b><ul>'+(s.invalidation||[]).map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul>';}).join('')+'<p>'+esc((role.summary||[]).join(' '))+'</p></section>';}).join('')||'<p>자료·검증 요건을 충족하지 못해 AI 검토를 완료하지 못했습니다.</p>')+'<h3>근거 출처</h3><ul>'+(r.sources||[]).map(function(s){return '<li>'+esc(s.id)+' · '+esc(s.source)+' · '+esc(s.date)+'</li>';}).join('')+'</ul><p class="ev">뉴스 '+Number(r.news_count||0)+'건 · '+esc(r.news_status||'확인 불가')+' · 집계 재무자료와 뉴스 제목 기반 조사이며 공시 원문 전체 검증이 아닙니다. 재무 금액 단위는 원자료 기준입니다.</p></article>';
 }
+function companyListRows(data,query){
+ var companies=data.companies||[],q=String(query||'').trim().toLowerCase();
+ if(q)return companies.filter(function(c){return c.name.toLowerCase().includes(q)||String(c.code).toLowerCase().includes(q);}).slice(0,12);
+ var byCode={};companies.forEach(function(c){byCode[c.code]=c;});
+ var featured=(data.featured_codes||[]).map(function(code){return byCode[code];}).filter(Boolean);
+ if(featured.length)return featured.slice(0,12);
+ var seen={};return (data.reports||[]).slice().reverse().map(function(r){return byCode[r.code];}).filter(function(c){if(!c||seen[c.code])return false;seen[c.code]=true;return true;}).slice(0,12).concat(companies.filter(function(c){return !seen[c.code];}).slice(0,12)).slice(0,12);
+}
 function mountCompanySearch(data,esc,run){
  var input=document.getElementById('companyQuery'),list=document.getElementById('companyResults'),body=document.getElementById('companyBody');
  if(!input||!list||!body)return;
  var selected=null,busy=false;
- function render(){var q=input.value.trim().toLowerCase();var rows=(data.companies||[]).filter(function(c){return !q||c.name.toLowerCase().includes(q)||c.code.includes(q);}).slice(0,12);
- list.innerHTML=rows.map(function(c){var saved=(data.reports||[]).some(function(r){return r.code===c.code;});return '<button type="button" data-company-code="'+esc(c.code)+'"><b>'+esc(c.name)+'</b><small>'+esc(c.code)+' · '+(saved?'보고서 있음':'미분석')+'</small></button>';}).join('')||'<p>지원 목록에서 찾지 못했습니다. 현재 코스피 시총 상위 100개 관리 기업을 지원합니다.</p>';
+ function render(){var q=input.value.trim().toLowerCase(),rows=companyListRows(data,q),featured=!q&&(data.featured_codes||[]).length>0;
+ var heading=q?'':('<p class="ev">'+(featured?'추천 분석 대상 '+esc(data.featured_date||'기준일 미확인'):'최근 작성된 심층보고서')+' · 보고서 작성일을 확인하세요. 목록 갱신만으로 새 심층분석이 실행되지는 않습니다.</p>');
+ list.innerHTML=heading+(rows.map(function(c){var saved=(data.reports||[]).filter(function(r){return r.code===c.code;}).slice(-1)[0];var stamp=saved?String(saved.generated_at||'').slice(0,10):'';var report=stamp?'심층보고서 '+esc(stamp)+' · '+esc(({reviewed:'검토 완료',held:'판단 보류',failed:'실패'})[saved.status]||'상태 확인 필요'):'심층보고서 미작성';return '<button type="button" data-company-code="'+esc(c.code)+'"><b>'+esc(c.name)+'</b><small>'+esc(c.code)+' · '+report+'</small></button>';}).join('')||'<p>지원 목록에서 찾지 못했습니다. 현재 코스피 시총 상위 100개 관리 기업을 지원합니다.</p>');
  list.querySelectorAll('[data-company-code]').forEach(function(b){b.addEventListener('click',function(){selected=b.getAttribute('data-company-code');show();});});}
  function show(){var records=(data.reports||[]).filter(function(r){return r.code===selected;}).reverse();var c=(data.companies||[]).find(function(c){return c.code===selected;});
  body.innerHTML='<h3>'+esc(c?c.name:selected)+'</h3>'+(run?'<p class="ev">내 PC 전용 · 하루 1건, 최대 3회 모델 호출 · 실패해도 당일 실행 한도는 유지됩니다. 실행 시 API 비용이 발생할 수 있습니다.</p><button type="button" id="runCompany" '+(busy?'disabled':'')+'>'+(busy?'분석 중…':'이 기업 새 심층분석 실행')+'</button>':'<p class="ev">공개 페이지에서는 저장된 보고서만 볼 수 있습니다.</p>')+companyReportView(records[0],esc)+(records.length>1?'<details><summary>이전 조사 '+(records.length-1)+'건</summary>'+records.slice(1).map(function(r){return companyReportView(r,esc);}).join('')+'</details>':'');
@@ -828,24 +1215,46 @@ function paperProfit(v,percent){
  var cls=rounded>0?'pnl-profit':rounded<0?'pnl-loss':'pnl-neutral';
  return '<strong class="pnl '+cls+'">'+(rounded>0?'+':'')+(percent?rounded.toFixed(3)+'%':rounded.toLocaleString()+'원')+'</strong>';
 }
+function paperActivityView(a,esc){
+ if(!a)return '<div class="audit-note"><h3>오늘 모의매매 점검</h3><p>판단 상태 확인 대기</p></div>';
+ var extra=!a.etf_neutral_probe&&typeof a.etf_best_probability==='number'&&(a.etf_entry_probability_strict?a.etf_best_probability<=a.etf_entry_probability_required:a.etf_best_probability<a.etf_entry_probability_required)?
+   '<p>ETF 후보 최고 상승확률 '+esc(a.etf_best_probability)+'% · 진입 기준 '+esc(a.etf_entry_probability_rule||'60% 이상')+' 미달</p>':'';
+ return '<div class="audit-note"><h3>오늘 모의매매 점검 · '+esc(a.market||'상태 확인 중')+'</h3>'+
+   '<p><b>단기</b> '+esc(a.short_reason||'판단 대기')+' · '+esc(a.etf_qa_status||'검증 대기')+'</p>'+
+   (a.etf_qa_reason?'<p class="ev"><b>ETF QA 보류 사유</b> '+esc(a.etf_qa_reason)+'</p>':'')+
+   '<p><b>장기</b> '+esc(a.long_reason||'판단 대기')+'</p>'+extra+
+   '<p class="ev">하락 대응은 인버스 ETF(114800) 전용 승인 계획이 있을 때만 가능합니다. AI 확률 50%는 중립이며, 3종 모두 50%이고 전일 기준 5거래일 지수·ETF 추세가 일치할 때만 단기자금 5%를 규칙 기반으로 탐색합니다. 탐색 손익은 계좌에 반영하고 AI 방향 적중률에서는 제외합니다. 첫 매수는 09:00–09:15, 이후 재진입에는 기존 계획과 시간별 방향 확인이 필요합니다.</p>'+
+   '<p class="ev">마지막 계좌 점검 '+esc(a.checked_at||'기록 없음')+' · 원장 상태 '+esc(a.quote_status||'확인 대기')+
+   ' · 누적 가상 체결 '+esc(a.total_trades||0)+'건 · 마지막 체결 '+esc(a.last_trade_at||'없음')+'</p>'+
+   '<p class="ev">다음 확인: '+esc(a.next_check||'미정')+' · 조건 미충족은 매수 신호가 아닙니다.</p></div>';
+}
+function shortExitLabel(reason){
+ return ({profit_target_exit:'비용 차감 목표수익 도달',profit_trailing_exit:'최고 수익률 되돌림 청산',intraday_exit:'시간별 방향 불일치',intraday_ai_switch:'장중 AI 방향 변경',manual_exit:'사용자 수동 매도',scheduled_exit:'15:20 예정 청산',risk_exit:'손실 제한 청산'})[reason]||'기존 청산 규칙';
+}
 function executionAlignmentView(a,esc){
  var futuresNotice='<p class="ev"><b>선물 데이터 연결 · 추후 오픈 예정</b><br>현재 선물 시세·F-KOSPI200 직접 지수는 연결되지 않았습니다. 기존 ETF 모의운용은 계속되며, 선물 직접 매매 기능은 없습니다.</p>';
  if(!a)return futuresNotice+'<p>기존 KOSPI 신호 기반 운용 기록 · 새 ETF 운용 성과와 분리합니다.</p>';
  var pct=function(n){return typeof n==='number'?n.toFixed(3)+'%':'채점 대기';};
  var out=futuresNotice+'<div class="audit-note"><h3>단기 ETF 운용 · 별도 성과 장부</h3><p>'+esc(a.note)+'</p><p>기존 방식 체결 '+esc(a.legacy_trade_count)+'건 보존 · 새 방식 완료 '+esc(a.closed_cycles)+'회</p>';
  out+=a.closed_cycles?'<p>비용 차감 손익 '+paperProfit(a.net_pnl,false)+' · 회차 누적 '+paperProfit(a.net_return_pct,true)+' · 운용 중 관측 최대 낙폭 '+pct(a.observed_cycle_max_drawdown_pct)+'</p>':'<p>새 방식의 완료된 거래가 없어 수익률·적중률 평가를 시작하지 않았습니다.</p>';
- if(a.active)out+='<p>진입 '+esc(a.active.entry_at)+' · 보유 중 · 확정 성과 아님</p>';
- out+='<p>예측: 대상일 아침 실제 진입 → 15:20. 신규 진입은 09:00–09:15만 허용합니다. 손실 한도 조기 청산이나 지연 청산은 원래 시간대 예측의 적중률에 넣지 않습니다.</p></div>';
- (a.recent_cycles||[]).forEach(function(c){out+='<details><summary>'+esc(c.entry_at.slice(0,10))+' 운용 결과 · '+paperProfit(c.net_return_pct,true)+'</summary><p>실제 진입 '+esc(c.entry_at)+' → 실제 청산 '+esc(c.exit_at)+' · 수수료/세금 '+Number(c.costs).toLocaleString()+'원 (슬리피지는 손익에 반영)</p>'+(c.scores||[]).map(function(s){return '<p>'+esc(s.code)+' · 같은 보유 구간 가격 변화 '+pct(s.return_pct)+' · '+(s.correct===true?'방향 적중':s.correct===false?'방향 빗나감':'시간대 불일치/자료 부족 · 채점 제외')+'</p>';}).join('')+'</details>';});
+ if(a.neutral_probe_closed_cycles)out+='<p>중립 탐색 '+esc(a.neutral_probe_closed_cycles)+'회 · 비용 차감 손익 '+paperProfit(a.neutral_probe_net_pnl,false)+' · AI 방향 적중률에서 제외</p>';
+ if(a.manual_closed_cycles)out+='<p>수동 모의체결 '+esc(a.manual_closed_cycles)+'회 · 비용 차감 손익 '+paperProfit(a.manual_net_pnl,false)+' · AI 적중률 제외</p>';
+ if(a.intraday_ai_closed_cycles)out+='<p>장중 AI 재판단 '+esc(a.intraday_ai_closed_cycles)+'회 · 비용 차감 손익 '+paperProfit(a.intraday_ai_net_pnl,false)+' · 아침 예측과 별도 평가</p>';
+ if(a.active)out+='<p><b>현재 보유</b> · '+(a.active.selection_basis==='neutral_probe'?'중립 탐색 · ':a.active.selection_basis==='manual'?'수동 체결 · ':a.active.selection_basis==='intraday_ai'?'장중 AI 재판단 · ':'')+'매수 '+esc(String(a.active.entry_at).replace('T',' ').slice(0,19))+' KST · 미실현 손익은 아래 계좌에 표시</p>';
+ if(a.last_review)out+='<p>최근 장중 검토 '+esc(String(a.last_review.at).replace('T',' ').slice(0,19))+' KST · '+esc(a.last_review.verdict)+' · '+esc(a.last_review.reason)+'</p>';
+ if((a.recent_cycles||[]).length){var latest=a.recent_cycles[0];out+='<p><b>최근 청산</b> · '+(latest.selection_basis==='neutral_probe'?'중립 탐색 · ':latest.selection_basis==='manual'?'수동 체결 · ':latest.selection_basis==='intraday_ai'?'장중 AI 재판단 · ':'')+'매수 '+esc(String(latest.entry_at).replace('T',' ').slice(0,19))+' → 매도 '+esc(String(latest.exit_at).replace('T',' ').slice(0,19))+' KST · '+shortExitLabel(latest.exit_reason)+' · 확정 손익 '+paperProfit(latest.net_pnl,false)+'</p>';}
+ out+='<p>새로 승인되는 단기 ETF 계획은 매수·예상 매도 비용을 뺀 보유분 수익률이 1.20%에 도달하면 목표수익 청산합니다. 0.60%를 넘기면 최고 수익률에서 0.35%p 이상 되돌아올 때 청산합니다. 기존 계획·보유분에는 소급 적용하지 않습니다. 첫 진입 09:00–09:15, 이후 10~14시 매시간 KOSPI200 방향을 재검토합니다. 청산 후 같은 ETF 재진입에는 다음 시간대 방향 확인이 필요합니다. 시세 부족·QA 미승인 시 신규 매수하지 않으며 15:20 이후 첫 유효 시세에 청산합니다. 조기·지연 청산은 원래 예측 적중률에서 제외합니다. 5분 점검과 모의 체결 때문에 목표 수익은 보장되지 않습니다.</p></div>';
+ (a.recent_cycles||[]).forEach(function(c){out+='<details><summary>'+esc(c.entry_at.slice(0,10))+(c.selection_basis==='neutral_probe'?' 중립 탐색':c.selection_basis==='manual'?' 수동 모의체결':c.selection_basis==='intraday_ai'?' 장중 AI 재판단':' 운용 결과')+' · '+paperProfit(c.net_return_pct,true)+'</summary><p>실제 진입 '+esc(c.entry_at)+' → 실제 청산 '+esc(c.exit_at)+' · '+shortExitLabel(c.exit_reason)+' · 수수료/세금 '+Number(c.costs).toLocaleString()+'원 (슬리피지는 손익에 반영)</p>'+(c.selection_basis==='manual'?'<p>사용자 직접 선택 · AI 적중률 제외</p>':(c.scores||[]).map(function(s){return '<p>'+esc(s.code)+' · 같은 보유 구간 가격 변화 '+pct(s.return_pct)+' · '+(c.selection_basis==='neutral_probe'?'규칙 기반 탐색 · AI 적중률 제외':s.correct===true?'방향 적중':s.correct===false?'방향 빗나감':'조기·지연 청산/자료 부족 · 채점 제외')+'</p>';}).join(''))+'</details>';});
  return out;
 }
 function etfPlanView(plan,esc){
  if(!plan||!plan.status)return '<p class="ev">이 보고서는 기존 KOSPI 시장 전망입니다. ETF 전용 판단은 기록되지 않았으며 신규 ETF 매매 근거로 재사용하지 않습니다.</p>';
- return '<section><h3>별도 단기 ETF 운용 판단</h3><p>'+esc(plan.note)+'</p><p>'+esc(plan.futures_note)+'</p><p>대상일 '+esc(plan.target_date)+' · 진입 '+esc(plan.entry_window)+' · 예정 청산 '+esc(plan.exit_time)+'</p>'+(plan.forecasts||[]).map(function(f){return '<p><b>'+esc(f.name)+'</b> · 실제 진입 이후 상승 확률 '+esc(f.up_probability)+'%</p><ul>'+(f.reasoning||[]).map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul>';}).join('')+'<p>계획 상품 '+esc(plan.selected_code||'현금')+' · 단기 자금 비중 '+Number((plan.weight||0)*100)+'% · 체결 완료를 뜻하지 않습니다.</p></section>';
+ return '<section><h3>별도 단기 ETF 운용 판단</h3><p>'+esc(plan.note)+'</p><p>ETF 전용 QA '+esc((plan.schema===3||plan.schema===4)?(plan.qa&&plan.qa.passed===true?'통과':'미통과'):'구버전 · 전체 최종 QA 적용')+' · '+esc((plan.qa||{}).scope||'')+'</p>'+(plan.qa&&plan.qa.reason?'<p><b>전용 QA 기록</b> '+esc(plan.qa.reason)+(plan.qa.instrument?' · '+esc(plan.qa.instrument):'')+' · 근거 자료 '+esc(plan.qa.source_count==null?'미기록':plan.qa.source_count)+'종</p>':plan.qa&&plan.qa.passed===false?'<p class="ev">당시 세부 탈락 항목 미기록 · 원래 분석 결과에서 정확한 이유를 복원할 수 없습니다.</p>':'')+'<p>'+esc(plan.futures_note)+'</p><p>대상일 '+esc(plan.target_date)+' · 진입 '+esc(plan.entry_window)+' · 예정 청산 '+esc(plan.exit_time)+'</p>'+(plan.neutral_probe?'<p><b>중립 탐색 근거</b> '+esc(plan.neutral_probe.basis_date)+' 이전 5거래일 변화 · KOSPI200 '+esc(plan.neutral_probe.five_session_return_pct.KPI200)+'% · 정방향 '+esc(plan.neutral_probe.five_session_return_pct['069500'])+'% · 인버스 '+esc(plan.neutral_probe.five_session_return_pct['114800'])+'% · 자료 '+esc((plan.neutral_probe.source_ids||[]).join(', '))+' · AI 적중률 제외</p>':'')+(plan.forecasts||[]).map(function(f){return '<p><b>'+esc(f.name)+'</b> · 실제 진입 이후 상승 확률 '+esc(f.up_probability)+'%</p><ul>'+(f.reasoning||[]).map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul>';}).join('')+'<p>계획 상품 '+esc(plan.selected_code||'현금')+' · 단기 자금 비중 '+Number((plan.weight||0)*100)+'% · 체결 완료를 뜻하지 않습니다.</p></section>';
 }
 
 function reportVerdict(p){
   var d=p.direction,prob=p.up_probability,valid=typeof prob==='number'&&isFinite(prob)&&prob>=0&&prob<=100;
+  if(valid&&prob===50)return '중립 · 방향 우위 없음';
   if((d==='up'&&valid&&prob<50)||(d==='down'&&valid&&prob>50))return '판단 불일치 · 확인 필요';
   if(d==='down'||d==='하락')return '하락 예상';
   if(d==='up'||d==='상승')return '상승 예상';
@@ -885,24 +1294,59 @@ function reportLibraryView(library,esc){
   }).join('');
 }
 
+function longPreopenView(r, esc) {
+  if(r.archived)return '';
+  var approved=r.status==='approved', plans=approved?(r.allocations||[]).filter(function(a){return typeof a.weight==='number'&&isFinite(a.weight)&&a.weight>0&&typeof a.buy_below==='number'&&isFinite(a.buy_below)&&a.buy_below>0;}):[];
+  var out='<section class="audit-note" aria-label="장기투자 사전 운용 계획"><h3>다음 장 시작 전 · 장기팀 조건부 계획</h3>';
+  if(!approved)out+='<p><b>신규 매수 보류</b> · 현재 승인된 장기 보고서가 없어 예정 주문이 없습니다.</p>';
+  else if(!plans.length)out+='<p><b>신규 매수 계획 없음</b> · 승인된 종목별 배분이 0건입니다. 기존 보유분은 별도 위험 중단 규칙에 따라 처리합니다.</p>';
+  else out+='<p><b>조건부 매수 후보 '+plans.length+'건</b> · 아래 가격은 체결 예정가가 아닌 매수 판단 기준입니다.</p>'+plans.map(function(a){var budget=8000000*a.weight,candidate=(r.candidates||[]).find(function(c){return c.code===a.code;});return '<p><b>'+esc(candidate?candidate.name:a.code)+'</b> ('+esc(a.code)+') · 매수 기준 '+esc(a.buy_below.toLocaleString())+'원 이하 · 목표 비중 '+esc((a.weight*100).toFixed(1))+'%'+(a.entry_tier==='starter'?' · 최대 5% 기초 진입':'')+' · 초기 장기 배정액 기준 약 '+esc(Math.round(budget).toLocaleString())+'원</p>';}).join('');
+  if(!plans.length){
+    var pending=(r.candidates||[]).filter(function(c){return (c.gate||{}).phase==='data_wait';});
+    if(pending.length)out+='<p><b>자료 확인 대기 '+pending.length+'곳</b> / 조사 '+(r.candidates||[]).length+'곳 · '+pending.map(function(c){return esc(c.name)+': '+esc((c.missing||[])[0]||'필수 재무자료 부족');}).join(' · ')+'</p>';
+    out+='<p class="ev">장기팀 매수 신호의 성능은 아직 평가할 자료가 부족합니다. 현금 보유의 0% 수익률을 예측 성능으로 해석하지 마세요. 실제 모의 체결·손익은 모의투자 화면에서 확인합니다.</p>';
+  }
+  out+='<p class="ev">보고서 '+esc(r.generated_at||'미생성')+' · 유효기한 '+esc(r.valid_until||'없음')+'</p><p class="ev">09:00 정각 체결 약속이 아닙니다. 개장 후 첫 유효 시세에서 보고서 유효기간, 뉴스·자료 상태, 종목별 기준가, 월간 집행 여부, 현금·위험 한도를 다시 확인합니다. 시세가 기준가를 넘거나 자료가 지연되면 매수하지 않습니다. 모의 체결가에는 슬리피지가 반영되어 기준가보다 높을 수 있습니다.</p><p class="ev">장기 목표 매도가는 현재 계획에 없습니다. 매도 가격이나 수익은 미리 확정할 수 없으며, 실제 가상 체결과 손익은 모의투자 기록에서 확인합니다.</p></section>';
+  return out;
+}
 function longResearchView(r, esc) {
   if(!r)return '<p>장기팀 조사 대기</p>';
   var fmt=function(v){return typeof v==='number'&&isFinite(v)?v.toLocaleString(undefined,{maximumFractionDigits:2}):'자료 없음';};
   var status={ok:'수집 완료',insufficient:'자료 부족',unavailable:'수집 실패',partial:'일부 수집 실패',waiting:'대기',approved:'보고서 검토 완료',held:'매수 보류'};
-  var out='<div class="audit-note"><b>장기팀 · 배정 800만원 · '+esc(status[r.status]||r.status)+'</b><p>'+esc(r.note)+'</p><p>보고서 '+esc(r.generated_at||'미생성')+' · 유효기한 '+esc(r.valid_until||'없음')+'</p><p>기업가치 분석 → 독립 반대 검토 → 장기 운용 담당. 승인 배분이 없으면 하루 최대 3회 모델 호출, 승인 배분이 있으면 7일 간격으로 재검토합니다. 뉴스는 매시간 수집합니다.</p></div>';
+  var out=longPreopenView(r,esc)+'<div class="audit-note"><b>장기 자금 총 800만원 · 기업분석 560만원 / 기준 ETF 240만원 · '+esc(status[r.status]||r.status)+'</b><p>'+esc(r.note)+'</p><p>보고서 '+esc(r.generated_at||'미생성')+' · 유효기한 '+esc(r.valid_until||'없음')+'</p><p>기업가치 분석 → 독립 반대 검토 → 장기 운용 담당. 승인 배분이 없으면 하루 최대 3회 모델 호출, 승인 배분이 있으면 7일 간격으로 재검토합니다. 뉴스는 매시간 수집합니다.</p></div>';
+  if((r.gate_counts||[]).length)out+='<div class="audit-note"><b>장기 기업 후보의 관문별 현황</b><p>'+(r.gate_counts||[]).filter(function(x){return x.count>0;}).map(function(x){return esc(x.label)+' '+Number(x.count)+'곳';}).join(' · ')+'</p><p class="ev">자료·재무·가격·보고서 판단을 구분해 집계했습니다. 검증 기준과 매수 승인 조건은 그대로입니다.</p></div>';
+  if((r.allocation_adjustments||[]).length)out+='<p class="ev">배분 조정: '+r.allocation_adjustments.map(function(a){return esc(a.code)+' · '+esc(({starter_valuation:'최대 5% 기초 진입 상한 적용',price_above_starter_limit:'가격 상한 초과 · 해당 종목 제외',fundamental_or_critic_block:'재무 또는 반대검토 미통과 · 해당 종목 제외'})[a.reason]||'종목별 보류');}).join(' / ')+'</p>';
   if(r.review_issue)out+='<p class="ev">이번 조사 보류 사유: '+esc(r.review_issue)+' · 같은 날 모델 재호출은 하지 않습니다.</p>';
-  if(!r.archived && r.watchlist){var w=r.watchlist;out+='<h3>관심 목록 · 실제 조사 대상과 구분</h3><p>'+esc(w.label)+' · 확보 '+esc(w.count)+'개 · '+esc(status[w.status]||w.status)+' · '+esc(w.checked_at||'갱신 대기')+'</p><p class="ev">'+esc(w.note)+' 단기팀 추천은 후보 선정의 참고이며 장기 매수 승인이 아닙니다. 업종당 최대 3개, 관심 목록 최대 15개를 유지합니다.</p><div class="watch-grid">'+(w.rows||[]).map(function(c){return '<div class="watch-item"><b>'+esc(c.name)+'</b><small>'+esc(({Technology:'정보기술',Industrials:'산업재','Consumer Cyclical':'경기소비재','Consumer Defensive':'필수소비재','Financial Services':'금융',Healthcare:'헬스케어','Basic Materials':'소재',Utilities:'유틸리티',Energy:'에너지','Communication Services':'통신·미디어','Real Estate':'부동산',Unknown:'업종 미확인'})[c.sector]||c.sector)+' · '+esc(({research:'심층 조사 후보',watch:'관찰',needs_data:'추가 자료 필요'})[c.status]||c.status)+'</small><small>'+esc((c.reasons||[]).join(' '))+'</small><small>PER '+fmt((c.metrics||{}).trailingPE)+' / PBR '+fmt((c.metrics||{}).priceToBook)+' · 결산기 '+esc(c.period_end||'미확인')+'</small><small>'+esc(c.source||'자료 대기')+'</small></div>';}).join('')+'</div><p>최근 주간 조사 묶음: '+esc((w.batch||[]).join(', ')||'기존 보고서 유지 · 다음 주간 조사 대기')+'</p>';}
+  if(!r.archived && (r.dart_financial_checks||[]).length)out+='<div class="audit-note"><b>최근 OpenDART 재무 대조</b><p>'+(r.dart_financial_checks||[]).map(function(x){var label={verified:'대조 통과',verified_derived_eps:'대조 통과 · EPS 누적 계산',partial_eps:'핵심 수치 대조 · EPS 미확인 · 매수 보류',partial_debt:'핵심 수치 대조 · 차입금 미확인 · 매수 보류',partial_debt_eps:'핵심 수치 대조 · 차입금·EPS 미확인 · 매수 보류',mismatch:'수치 불일치 · 매수 보류',unavailable:'대조 불가 · 매수 보류',waiting:'대조 대기'};return esc(x.name)+' · '+esc(label[x.status]||'대조 대기')+' · '+esc(x.period_end||'기간 없음')+(x.reason?' · '+esc(x.reason):'');}).join('<br>')+'</p><p class="ev">이 상태는 최신 자료 확인 결과입니다. 위 장기팀 보고서는 생성 시각의 별도 판단이며, 새 공시 대조만으로 과거 판단을 자동 승인하지 않습니다.</p></div>';
+  if(!r.archived && r.watchlist){var w=r.watchlist;out+='<h3>장기 조사 후보 · 심층 보고서·매수 승인과 구분</h3><p>'+esc(w.label)+' · 1차 선별 '+esc(w.count)+'개 · 조사 후보 '+esc((w.rows||[]).length)+'개 · '+esc(status[w.status]||w.status)+' · '+esc(w.checked_at||'갱신 대기')+'</p><p class="ev">'+esc(w.note)+' 단기팀 추천은 후보 선정의 참고이며 장기 매수 승인이 아닙니다. 업종당 최대 5개, 조사 후보 최대 30개를 유지합니다.</p><div class="watch-grid">'+(w.rows||[]).map(function(c){return '<div class="watch-item"><b>'+esc(c.name)+'</b><small>'+esc(({Technology:'정보기술',Industrials:'산업재','Consumer Cyclical':'경기소비재','Consumer Defensive':'필수소비재','Financial Services':'금융',Healthcare:'헬스케어','Basic Materials':'소재',Utilities:'유틸리티',Energy:'에너지','Communication Services':'통신·미디어','Real Estate':'부동산',Unknown:'업종 미확인'})[c.sector]||c.sector)+' · '+esc(({research:'심층 조사 후보',watch:'관찰',needs_data:'추가 자료 필요'})[c.status]||c.status)+'</small><small>'+esc((c.reasons||[]).join(' '))+'</small><small>PER '+fmt((c.metrics||{}).trailingPE)+' / PBR '+fmt((c.metrics||{}).priceToBook)+' · 결산기 '+esc(c.period_end||'미확인')+'</small><small>'+esc(c.source||'자료 대기')+'</small></div>';}).join('')+'</div><p>최근 주간 조사 묶음: '+esc((w.batch||[]).join(', ')||'기존 보고서 유지 · 다음 주간 조사 대기')+'</p>';}
   out+='<h3>하락해도 가치가 유지되는지 확인할 조사 대상</h3><p class="ev">아래 종목은 해당 보고서에서 실제로 조사한 대상입니다. 관심 목록 전체가 심층 분석된 것은 아닙니다. 가격 하락만으로 매수하지 않습니다. 최근 5개 분기의 실적·현금흐름, 부채, PER·PBR을 검사하며 자료가 빠지면 보류합니다. Yahoo 집계자료이며 공시 원문 대조를 완료했다는 뜻은 아닙니다.</p>';
   out+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px">'+(r.candidates||[]).map(function(c,i){var m=c.metrics||{};return '<div style="border:1px solid var(--line);border-radius:12px;padding:16px"><h3>'+esc(c.name)+' [M'+(i+1)+']</h3><p><b>'+esc(({data_wait:'자료 확인 대기',sector_review:'업종별 검증 대기',fundamental_fail:'장기 투자 근거 미충족',valuation_wait:'가치평가 기준 대기',report_wait:'보고서 승인 대기',thesis_wait:'종목별 매수 배분 없음',news_wait:'관련 뉴스 재검토 대기',price_wait:'매수가격 대기',eligible:'조건 충족'})[(c.gate||{}).phase]||'검토 대기')+'</b> · '+esc((c.gate||{}).reason||'상태 확인 중')+'</p><p>결산기 '+esc(c.period_end||'확인 불가')+' · '+esc(c.source)+'</p><p>PER '+fmt(m.pe)+' / PBR '+fmt(m.pb)+' / 부채·자본 '+fmt(m.debt_equity)+'</p><p>매출 전년동기 대비 '+fmt(m.revenue_yoy_pct)+'% · 최근 4분기 순이익 '+fmt(m.ttm_income)+'원 · 잉여현금흐름 '+fmt(m.ttm_fcf)+'원</p><p class="ev">'+esc((c.missing||[]).join(', ')||'자료 누락 기록 없음')+'</p><details><summary>매수 기준과 현재 값</summary><ul>'+((c.gate||{}).criteria||[]).map(function(x){return '<li>'+esc(x.label)+' · '+fmt(x.value)+' / 기준 '+esc(x.required)+' · '+esc(({pass:'통과',fail:'미충족',unknown:'자료 없음'})[x.result]||'확인 대기')+'</li>';}).join('')+'</ul><p>매수 기준가 '+fmt((c.gate||{}).buy_below)+'원 · '+esc((c.gate||{}).next_review||'재검토 일정 확인 중')+'</p></details></div>';}).join('')+'</div>';
+  out+='<h3>OpenDART 재무·EPS 대조</h3><p class="ev">연결재무제표(CFS) 공식 계정과 Yahoo 집계 수치를 같은 결산기 기준으로 비교합니다. EPS에 “누적 계산”이 표시되면 사업보고서와 분기 누적값으로 산출한 TTM이며 4분기 EPS 직접 공시는 아닙니다. 가격·주식수·PBR의 독립 검증은 포함하지 않습니다.</p>';
+  out+='<div class="watch-grid">'+(r.candidates||[]).map(function(c){var v=c.dart_verification||{}, names={ttm_income:'최근 4분기 순이익',ttm_fcf:'최근 4분기 잉여현금흐름',equity:'자본',debt:'차입금',latest_quarter_revenue:'최근 분기 매출',prior_year_quarter_revenue:'전년동기 매출',ttm_eps:'최근 4분기 EPS'};var st={verified:'공시 대조 통과',verified_derived_eps:'공시 대조 통과 · EPS 누적 계산',partial_eps:'핵심 수치 대조 · EPS 미확인 · 매수 보류',partial_debt:'핵심 수치 대조 · 차입금 미확인 · 매수 보류',partial_debt_eps:'핵심 수치 대조 · 차입금·EPS 미확인 · 매수 보류',mismatch:'수치 불일치 · 매수 보류',unavailable:'공시 대조 불가 · 매수 보류',waiting:'대조 대기'};return '<div class="watch-item"><b>'+esc(c.name)+' · '+esc(st[v.status]||'대조 대기')+'</b><small>기준일 '+esc(v.period_end||c.period_end||'없음')+(v.reason?' · '+esc(v.reason):'')+'</small><details><summary>대조 수치와 공시 보기</summary><ul>'+(v.checks||[]).map(function(x){return '<li>'+esc(names[x.metric]||x.metric)+' · Yahoo '+fmt(x.yahoo)+' / OpenDART '+fmt(x.dart)+' · '+(x.match?'허용범위 내':'불일치 또는 자료 없음')+(x.difference_pct!=null?' · 차이 '+fmt(x.difference_pct)+'%':'')+'</li>';}).join('')+'</ul><p>'+(v.receipts||[]).map(function(x){var prefix='https://dart.fss.or.kr/dsaf001/main.do?rcpNo=';var u=typeof x.url==='string'&&x.url.startsWith(prefix)&&x.url.length===prefix.length+14&&/^[0-9]{14}$/.test(x.url.slice(prefix.length))?x.url:'';return u?'<a href="'+esc(u)+'" target="_blank" rel="noopener noreferrer">공시 '+esc(x.id)+'</a>':'';}).join(' · ')+'</p></details></div>';}).join('')+'</div>';
   if((r.deferred||[]).length)out+='<p>자료 부족으로 이번 심층 판단에서 보류: '+r.deferred.map(function(f){return esc(f.name)+' ('+esc((f.missing||[]).join(', '))+')';}).join(' / ')+'</p>';
   (r.roles||[]).forEach(function(role){out+='<h3>'+esc(role.name)+'</h3><p class="ev">모델 해석과 검토 의견입니다. 뉴스 원문의 사실 확인을 완료했다는 뜻은 아닙니다.</p>';(role.stocks||[]).forEach(function(s){out+='<p><b>'+esc(s.name)+' · '+esc(({consider:'검토 가능',watch:'관찰',reject:'반대'})[s.stance]||s.stance)+'</b></p><ul>'+s.points.map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul><p>투자 근거 재검토 조건</p><ul>'+s.invalidation.map(function(p){return '<li>'+esc(p)+'</li>';}).join('')+'</ul>';});out+=(role.summary||[]).map(function(s){return '<p>'+esc(s)+'</p>';}).join('');});
-  out+='<h3>장기 운용 계획</h3>'+(r.allocations||[]).map(function(a){return '<p>'+esc(a.code)+' · 목표 '+fmt(a.weight*100)+'% · 매수 기준 '+fmt(a.buy_below)+'원 이하</p>';}).join('');
+  out+='<h3>장기 운용 계획</h3>'+(r.allocations||[]).map(function(a){return '<p>'+esc(a.code)+' · 목표 '+fmt(a.weight*100)+'%'+(a.entry_tier==='starter'?' · 최대 5% 기초 진입':'')+' · 매수 기준 '+fmt(a.buy_below)+'원 이하</p>';}).join('');
   if(!(r.allocations||[]).length)out+='<p>승인된 종목 배분 없음 · 기존 현금/보유 유지. 자료 부족은 기업가치 부적격 판정이 아닙니다.</p>';
   out+='<p class="ev">종목당 장기 자금 25%, 같은 업종 30%, 전체 주식 50% 상한. 금융업은 추가 건전성 검증 전 자동 매수에서 제외합니다. 하락 때 자동 물타기하지 않으며 매월 1회 가격 조건을 확인합니다. 계획 만료·뉴스 장애 시 전체 신규 매수를 막고, 종목별 중요 사건은 관련 종목만 보류합니다. 승인 종목의 가격 조건은 종목별로 확인합니다.</p>';
   if(r.archived)return out;
+  out+='<h3>OpenDART 공시 목록 · 약 60분 간격</h3><p>수집 상태 '+esc(status[r.dart_status]||r.dart_status||'대기')+' · 마지막 확인 '+esc(r.dart_checked_at||'없음')+' · 추적 종목 '+fmt(r.dart_tracked_count)+'개</p>';
+  if(r.dart_partial_reason)out+='<p class="ev">공시 수집 주의: '+esc(({page_limit:'조회 페이지 한도',offline_gap:'중단 기간 공시 누락 가능',request_or_schema_error:'요청 또는 응답 오류'})[r.dart_partial_reason]||r.dart_partial_reason)+'</p>';
+  out+='<p class="ev">최근 접수번호·제목 목록입니다. 공시 원문이나 재무 수치를 자동 검증한 결과는 아닙니다. 목록을 눌러 금융감독원 공시 원문을 확인할 수 있습니다.</p>';
+  out+='<div class="tbl" style="overflow-x:auto"><table><thead><tr><th>접수일</th><th>종목</th><th>공시 제목</th></tr></thead><tbody>'+(r.dart_events||[]).map(function(e){var url=/^https:\/\/dart\.fss\.or\.kr\/dsaf001\/main\.do\?rcpNo=[0-9]{14}$/.test(e.url||'')?e.url:'';return '<tr><td>'+esc(e.filed_date||'')+'</td><td>'+esc(e.name||e.code||'')+'</td><td>'+(url?'<a href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'+esc(e.title||'공시')+'</a>':esc(e.title||'공시'))+'</td></tr>';}).join('')+'</tbody></table></div>';
   out+='<h3>미국 뉴스 · 장 마감 후에도 감시</h3><p>수집 상태 '+esc(status[r.news_status]||r.news_status)+' · 마지막 시도 '+esc(r.news_checked_at||'없음')+' · 관련 보도 '+fmt(r.news_count)+'건</p><p>'+esc((r.block_reasons||[]).join(' / ')||'수집된 뉴스 기준 추가 차단 없음')+'</p><p class="ev">미국판 영문 뉴스이며 모든 발행사가 미국 소재인 것은 아닙니다. 직접 관련·고객사/경쟁사 간접 관련·거시 영향을 구분합니다. 제목 기반 위험 표시는 확인 요청이며 사실 확정이나 매매 지시가 아닙니다. 기사 원문은 재배포하지 않습니다.</p>';
   out+='<div class="tbl" style="overflow-x:auto"><table><thead><tr><th>발행시각</th><th>출처</th><th>연결 종목</th><th>검토 상태</th></tr></thead><tbody>'+(r.events||[]).map(function(n){var url=/^https:\/\//.test(n.url||'')?n.url:'';return '<tr><td>'+esc(n.evidence_id||'신규')+' · '+esc(n.published_at)+'</td><td>'+(url?'<a href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'+esc(n.source)+'</a>':esc(n.source))+'</td><td>'+(n.relations||[]).map(function(x){return esc(x.name)+' ('+esc(({direct:'직접',indirect:'간접',macro:'거시'})[x.kind]||x.kind)+(x.held?'·보유':'·조사')+')';}).join('<br>')+'</td><td>'+(n.risk_flag?'위험 단어 감지 · ':'')+(n.reviewed?'팀 검토 자료에 포함':'팀 재검토 대기')+'</td></tr>';}).join('')+'</tbody></table></div>';
   return '<div class="long-research">'+out+'</div>';
+}
+
+function mediumResearchView(r,esc){
+  if(!r)return '<p>중기팀 조사 대기</p>';
+  var labels={approved:'검증 통과',held:'신규 매수 보류'},reasons={report_unavailable:'보고서 없음·만료 또는 형식 오류',news_stale:'뉴스 점검이 2시간을 넘김',alerts_overflow:'위험 뉴스 검토 한도 초과',unreviewed_risk_news:'관련 위험 뉴스 재검토 필요',dart_unverified:'OpenDART 재무 대조 미통과',fundamentals_changed:'기업 재무 조건 변경·자료 누락',catalog_stale:'후보군 자료 만료',cash_choice:'분석가 현금 유지 선택',second_opinion_missing:'두 번째 분석 의견(장기팀·아침 종목 판단) 없음',second_opinion_conflict:'다른 분석 의견과 방향 충돌',model_unavailable:'모델 호출 실패',approved:'매수 조건 확인 대기'};
+  var name=r.selected_name||r.selected_code||(r.reason_code==='cash_choice'?'현금 유지':'분석 대기');
+  var out='<div class="audit-note"><b>중기 투자팀 · 1명 분석가 · 배정 200만원 · '+esc(labels[r.status]||'대기')+'</b><p>20~120일 보유 관점 · 1일 최대 1회 AI 판단 · 5분마다 보유 시세와 손익 점검</p><p>현재 판단: '+esc(name)+' · '+esc(reasons[r.reason_code]||r.reason_code||'조사 대기')+'</p><p>생성 '+esc(r.generated_at||'대기')+' · 유효 '+esc(r.valid_until||'없음')+'</p></div>';
+  if(r.status==='approved'&&r.selected_code)out+='<div class="paper-sleeve"><h3>'+esc(name)+' ('+esc(r.selected_code)+')</h3><p>AI 제안 비중 '+esc(Math.round((r.weight||0)*100))+'% · 중기 집행 목표 '+esc(Math.round((r.execution_weight||0)*100))+'% (정수 주식, 최대치)</p><p>관측 시세 '+esc(Number(r.buy_below).toLocaleString())+'원 이하 · 예정 보유 '+esc(r.horizon_days)+'일</p><p class="ev">AI 제안과 집행 정책은 별개입니다. 가상 체결가는 슬리피지를 더해 관측 시세보다 높을 수 있습니다. 실제 보유 수량·체결가·손익은 모의투자 화면을 확인하세요.</p></div>';
+  if((r.thesis||[]).length)out+='<div class="paper-sleeve"><h3>판단 근거</h3><ul>'+r.thesis.map(function(x){return '<li>'+esc(x)+'</li>';}).join('')+'</ul><h3>반대 근거와 위험</h3><ul>'+(r.risk||[]).map(function(x){return '<li>'+esc(x)+'</li>';}).join('')+'</ul><details><summary>근거 자료 ID 보기</summary><ul>'+(r.sources||[]).map(function(x){return '<li>'+esc(x.id)+' · '+esc(x.source)+' · '+esc(x.date)+'</li>';}).join('')+'</ul></details></div>';
+  out+='<p class="ev">기본 검증: 최근 4분기 순이익·현금흐름·EPS 양수, 매출 성장률 −10% 이상, 부채/자본 1.5 이하, PER 30·PBR 5 이하. 승인 종목 한 개의 집행 목표는 중기 계좌 최대 50%이며 정수 주식으로 실제 비중이 달라집니다. 기준가·공시 대조·뉴스 신선도를 확인하고, 비용 차감 손실 −12%, 수익 +18%, 또는 계획 보유기간 종료 시 모의 청산합니다. 12% 손실 기준은 중기 계좌 약 6% 위험 예산에 해당하지만 5분 관측·급변 시 이를 초과할 수 있습니다. 실제 주문은 하지 않습니다.</p>';
+  return out;
 }
 
 function splitPaperView(s, esc) {
@@ -914,26 +1358,66 @@ function splitPaperView(s, esc) {
   if(audit.status==='ok'&&stamp&&!isNaN(stamp.getTime())&&['Mon','Tue','Wed','Thu','Fri'].includes(parts.weekday)&&minute>=540&&minute<930&&(now-stamp)>600000){
     audit={status:'stale',note:'장중 시세 평가가 10분 이상 지연 · 수익률 표시 보류'};
   }
-  var metric=function(v){return audit.status==='stale'||audit.status==='mismatch'?null:v;};
-  var realized=function(v){return audit.status==='mismatch'?null:v;};
-  var total='<div class="audit-note paper-total"><b>가상자본금 '+won(s.initial_cash)+' · 실제 자금 거래 없음</b><br>평가금액 '+(audit.status==='mismatch'?'미확인':won(s.equity))+' · 오늘 손익 '+paperProfit(metric(s.day_pnl),false)+' ('+paperProfit(metric(s.day_return_pct),true)+')<br>누적 손익 '+paperProfit(metric(s.pnl),false)+' ('+paperProfit(metric(s.total_return_pct),true)+') · 현금 '+won(s.cash)+'<br>실현손익 '+paperProfit(realized(s.realized_pnl),false)+' / 평가손익 '+paperProfit(metric(s.unrealized_pnl),false)+' · 거래비용 '+won(s.fees)+'<br>평가 시각 '+esc(s.last_tick||'시세 수집 대기')+' · '+esc(audit.note||'원장 검증 대기')+'</div>';
-  var books='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px">'+(s.sleeves||[]).map(function(b){return '<div class="paper-sleeve '+(b.key==='long'?'paper-sleeve-long':'')+'"><h3 style="margin:0 0 12px">'+esc(b.label)+' · 배정 '+won(b.initial_cash)+'</h3><p>평가 '+won(b.equity)+' / 현금 '+won(b.cash)+'</p><p>실현 '+paperProfit(realized(b.realized_pnl),false)+' · 평가 '+paperProfit(metric(b.unrealized_pnl),false)+'</p><p>'+esc(b.status)+'</p><p>'+((b.holdings||[]).map(function(h){return esc(h.name)+' '+h.qty+'주 · 평균 매입원가 '+won(h.average_cost);}).join('<br>')||'보유 종목 없음')+'</p></div>';}).join('')+'</div>';
-  var trades='<h3>최근 가상 체결</h3><div class="tbl" style="overflow-x:auto"><table class="stat-table"><thead><tr><th>시각</th><th>계좌</th><th>종목</th><th>매매</th><th>수량</th><th>체결가</th><th>거래비용</th></tr></thead><tbody>'+(s.recent_trades||[]).map(function(t){return '<tr><td>'+esc(t.at)+'</td><td>'+(t.sleeve==='long'?'장기':'단기')+'</td><td>'+esc(t.name)+'</td><td>'+(t.side==='buy'?'매수':'매도')+'</td><td>'+t.qty+'</td><td>'+Number(t.price).toLocaleString(undefined,{maximumFractionDigits:3})+'원'+'</td><td>'+won(t.fee)+'</td></tr>';}).join('')+'</tbody></table></div>';
-  return executionAlignmentView(s.execution_alignment,esc)+total+'<p class="ev">전체 투자 노출 '+won(s.gross_exposure)+' · 상승/하락 상쇄 후 방향 노출 '+won(s.net_direction_exposure)+(s.hedged?' · 장기 상승 자산과 단기 인버스가 일부 상쇄됩니다.':'')+'</p>'+books+((s.recent_trades||[]).length?trades:'<p>아직 체결 없음 · 유효한 판단과 당일 시세를 기다립니다.</p>')+'<p class="ev">장기: 독립 장기팀의 종목 계획으로 월 1회 조정, 미승인·만료·뉴스 재검토 시 추가 매수 보류. 단기: KOSPI200·ETF 별도 판단, 종목별 근거 검증 후 최대 25%. 아침 진입/15:20 청산, 자료 장애 시 실제 체결은 지연될 수 있습니다. 단기 일손실 2% 현금화, 최고 평가액 대비 장기 15%/단기 10% 손실 시 중지. 장중 5분 점검이므로 손실 한도를 넘겨 체결될 수 있습니다. 관측 시세에 편도 거래비용 0.015%·슬리피지 0.05%를 가정하며 실제 호가·체결을 재현하지 않습니다. 개별주식 매도에는 세금 0.2%를 추가로 가정하며 실제 적용 세율과 다를 수 있습니다. 현금 이자·배당·ETF 분배금은 미반영입니다.</p>';
+  var metric=function(v){return audit.status==='ok'?v:null;};
+  var total='<div class="audit-note paper-total"><b>가상자본금 '+won(s.initial_cash)+' · 실제 자금 거래 없음</b><br>평가금액 '+(audit.status==='ok'?won(s.equity):'미확인')+' · 오늘 손익 '+paperProfit(metric(s.day_pnl),false)+' ('+paperProfit(metric(s.day_return_pct),true)+')<br>누적 손익 '+paperProfit(metric(s.pnl),false)+' ('+paperProfit(metric(s.total_return_pct),true)+') · 현금 '+won(s.cash)+'<br>실현손익 '+paperProfit(metric(s.realized_pnl),false)+' / 평가손익 '+paperProfit(metric(s.unrealized_pnl),false)+' · 거래비용 '+won(s.fees)+'<br>'+(audit.status==='ok'?'평가 시각 ':'점검 시각 ')+esc(s.last_tick||'시세 수집 대기')+' · '+esc(audit.note||'원장 검증 대기')+'</div>';
+  var last=s.last_complete_valuation||{};
+  if((audit.status==='partial'||audit.status==='stale')&&typeof last.equity==='number'&&typeof last.date==='string')
+    total+='<div class="audit-note"><b>마지막 전체 시세 평가 · 현재값 아님</b><br>'+esc(last.date)+' 기준 '+won(last.equity)+' · 당시 납입자본 '+won(last.contributed_capital)+' 대비 '+paperProfit(last.total_return_pct,true)+'<p class="ev">현재 시세가 모두 확인될 때까지 이 과거 평가를 최신 수익률로 사용하지 않습니다.</p></div>';
+    var books='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px">'+(s.sleeves||[]).map(function(b){return '<div class="paper-sleeve '+(b.key==='long'?'paper-sleeve-long':b.key==='long_core'?'paper-sleeve-core':b.key==='medium'?'paper-sleeve-medium':'')+'"><h3 style="margin:0 0 12px">'+esc(b.label)+' · 배정 '+won(b.initial_cash)+'</h3><p>평가 '+(audit.status==='ok'?won(b.equity):'미확인')+' / 현금 '+won(b.cash)+'</p><p>실현 '+paperProfit(metric(b.realized_pnl),false)+' · 평가 '+paperProfit(metric(b.unrealized_pnl),false)+'</p><p>'+esc(b.status)+'</p><p>'+((b.holdings||[]).map(function(h){return esc(h.name)+' '+h.qty+'주 · 평균 매입원가 '+won(h.average_cost);}).join('<br>')||'보유 종목 없음')+'</p></div>';}).join('')+'</div>';
+  var trades='<h3>최근 가상 체결</h3><div class="tbl" style="overflow-x:auto"><table class="stat-table"><thead><tr><th>시각</th><th>계좌</th><th>종목</th><th>매매</th><th>수량</th><th>체결가</th><th>거래비용</th><th>매도 실현손익</th></tr></thead><tbody>'+(s.recent_trades||[]).map(function(t){return '<tr><td>'+esc(String(t.at||'').replace('T',' ').slice(0,19))+' KST'+'</td><td>'+(t.sleeve==='long'?'장기 기업분석':t.sleeve==='long_core'?'장기 기준 ETF':t.sleeve==='medium'?'중기':'단기')+'</td><td>'+esc(t.name)+'</td><td>'+(t.side==='buy'?'매수':'매도')+'</td><td>'+t.qty+'</td><td>'+Number(t.price).toLocaleString(undefined,{maximumFractionDigits:3})+'원'+'</td><td>'+won(t.fee)+'</td><td>'+(t.side==='sell'?paperProfit(audit.status==='mismatch'?null:t.realized_pnl,false):'—')+'</td></tr>';}).join('')+'</tbody></table></div>';
+  var deposit=(s.capital_events||[]).filter(function(e){return e.type==='virtual_deposit';}).map(function(e){return '<p>가상 추가 입금 '+won(e.amount)+' · '+esc(e.at)+' · 단기 레버리지 별도 계정 · 매매 수익 제외</p>';}).join('');
+  var leverage=s.leverage_review||{};
+  var exposure='<details class="audit-note"><summary>날짜별 투자·현금 비중 자세히 보기</summary><div class="tbl" style="overflow-x:auto"><table class="stat-table"><thead><tr><th>거래일</th><th>전체 투자</th><th>전체 현금</th><th>팀별 투자 비중</th></tr></thead><tbody>'+(s.exposure_history||[]).map(function(row){var names={short:'단기',short_leverage:'레버리지',medium:'중기',long:'장기 기업',long_core:'장기 ETF'};return '<tr><td>'+esc(row.date)+'</td><td>'+esc(row.exposure_pct)+'%</td><td>'+esc(row.cash_pct)+'%</td><td>'+Object.keys(row.sleeves||{}).map(function(k){return esc(names[k]||k)+' '+esc(row.sleeves[k].exposure_pct)+'%';}).join(' · ')+'</td></tr>';}).join('')+'</tbody></table></div><p class="ev">투자 비중 = 당시 보유 주식·ETF 평가액 ÷ 전체 계좌 평가액. 시세가 누락된 날은 기록하지 않습니다.</p></details>';
+  var opportunity=D.paper_opportunity||{},noTrade=opportunity.no_trade_reason?'<p class="audit-note"><b>'+esc(opportunity.date)+' · 단기팀 거래 0건</b><br>'+esc(opportunity.no_trade_reason)+'</p>':'';
+  var waiting=s.leverage_waiting||{},leverageWait=waiting.entry_count===0?'<details class="audit-note"><summary>레버리지 계좌 '+Number(waiting.days)+'일 대기 · 사유 자세히 보기</summary><p>'+((waiting.top_reasons||[]).map(function(x){return esc(x.reason)+' '+Number(x.count)+'회';}).join(' · ')||'검토 기록이 부족해 원인 순위를 낼 수 없습니다.')+'</p><p class="ev">자금 이체는 자동으로 하지 않습니다. 기존 진입 QA와 손실 한도는 유지됩니다.</p></details>':'';
+  return paperActivityView(D.paper_activity,esc)+executionAlignmentView(s.execution_alignment,esc)+total+deposit+'<p class="ev">전체 투자 노출 '+won(s.gross_exposure)+' · 상승/하락 상쇄 후 방향 노출 '+won(s.net_direction_exposure)+(s.hedged?' · 장기 상승 자산과 단기 인버스가 일부 상쇄됩니다.':'')+'</p>'+books+exposure+noTrade+leverageWait+'<p class="ev">레버리지 추가 QA: '+esc(leverage.reason||'첫 검증 대기')+' · 유효 시세·추세·전체 노출 확인 후 추가 입금액의 최대 30%만 진입</p>'+((s.recent_trades||[]).length?trades:'<p>아직 체결 없음 · 유효한 판단과 당일 시세를 기다립니다.</p>')+'<p class="ev">장기 기준 ETF: 장기 800만원 중 240만원에서 KODEX 200 최초 1회 모의 매수, 이후 평가·15% 낙폭 청산 시 재진입 금지. 단기 레버리지: 별도 1천만원 중 최대 30%로 KODEX 레버리지 모의 진입, 지수·ETF·반대검토·추세 QA 필수. 목표수익·되돌림·손절 또는 15:20에 첫 유효 시세로 청산합니다. 시세 장애나 5분 간격 점검으로 정해 둔 가격보다 불리하게 체결될 수 있습니다.</p>';
 }
 
 function paperComparisonView(c, esc) {
   if(!c)return '';
   var won=function(v){return typeof v==='number'&&isFinite(v)?v.toLocaleString(undefined,{maximumFractionDigits:0})+'원':'미확인';};
-  var body=c.status==='ok'?'<p>기존 25%: '+paperProfit(c.primary_period_pnl,false)+' ('+paperProfit(c.primary_period_return_pct,true)+') · 공격형 40%: '+paperProfit(c.experiment_period_pnl,false)+' ('+paperProfit(c.experiment_period_return_pct,true)+')</p>':'<p>동일 시점 시세·원장 검증 전이라 수익률 비교를 보류합니다.</p>';
-  return '<div class="paper-sleeve"><h3>단기 비중 비교 · 별도 모의계좌</h3><p>두 방식 모두 단기 배정금 1,200만원을 기준으로 같은 승인 신호를 사용합니다. 공격형은 최대 40%만 매수합니다.</p>'+body+'<p class="ev">비교 시작 '+esc(c.started_at||'')+' · 기존 계좌 시작 평가액 '+won(c.primary_base_equity)+' · 과거 체결은 공격형에 복사하지 않음 · 공격형 체결 '+Number(c.experiment_trades||0)+'건 · 실제 투자 아님</p></div>';
+  var body=(c.status==='ok'||c.status==='archived')?'<p>기존 25%: '+paperProfit(c.primary_period_pnl,false)+' ('+paperProfit(c.primary_period_return_pct,true)+') · 공격형 40%: '+paperProfit(c.experiment_period_pnl,false)+' ('+paperProfit(c.experiment_period_return_pct,true)+')</p>':'<p>동일 시점 시세·원장 검증 전이라 수익률 비교를 보류합니다.</p>';
+  return '<div class="paper-sleeve"><h3>단기 비중 비교 · 별도 모의계좌</h3><p>'+(c.status==='allocation_changed'?'단기 계좌 자금이 1,000만원으로 바뀌어 이전 1,200만원 기준 비교를 종료했습니다.':String(c.status).indexOf('archived')===0?'40% 공격형 실험을 본계좌 정책에 반영해 기존 비교는 종료했습니다.':'두 방식 모두 자금 재배분 전의 단기 1,200만원 실험입니다. 현재 단기 계좌와 직접 비교하지 않습니다. 공격형은 최대 40%만 매수합니다.')+'</p>'+body+'<p class="ev">비교 시작 '+esc(c.started_at||'')+' · 기존 계좌 시작 평가액 '+won(c.primary_base_equity)+' · 과거 체결은 공격형에 복사하지 않음 · 공격형 체결 '+Number(c.experiment_trades||0)+'건 · 실제 투자 아님</p></div>';
+}
+
+function shadowV2View(c,esc){
+  if(!c)return '<div class="paper-sleeve"><h3>단기 활성화 비교 · 별도 가상계좌</h3><p>첫 유효 시세 점검을 기다립니다.</p></div>';
+  var pct=function(v){return typeof v==='number'&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'평가 대기';};
+  var ready=c.status==='review_ready';
+  return '<div class="paper-sleeve"><h3>단기 활성화 비교 · 1,200만원 섀도 원장</h3><p>'+esc(c.trading_days)+' / '+esc(c.minimum_days)+'거래일 관측 · '+esc(c.last_tick||'시세 대기')+'</p><p>기존 단기 계좌 '+pct(c.primary_return_pct)+' · 섀도 '+pct(c.shadow_return_pct)+'</p><details><summary>비용·낙폭·체결 비교 자세히 보기</summary><p>최대 낙폭: 기존 '+pct(c.primary_max_drawdown_pct)+' / 섀도 '+pct(c.shadow_max_drawdown_pct)+'</p><p>체결: 기존 '+esc(c.primary_fills)+'건 / 섀도 '+esc(c.shadow_fills)+'건 · 섀도 평균 투자 비중 '+pct(c.shadow_average_exposure_pct)+'</p><p>AI 방향 적중률 '+pct(c.direction_accuracy_pct)+' · 확률 오차 Brier '+esc(c.brier==null?'평가 대기':c.brier)+' · 정확히 50 비율 '+pct(c.exact_fifty_ratio_pct)+'</p><p class="ev">'+esc(c.note)+'</p></details><p class="ev">'+(ready?(c.criteria_met?'10거래일 예비 조건 충족 · 전환에는 사용자 검토·승인 필요':'10거래일 예비 조건 미충족 · 기존 정책 유지'):'10거래일 비교 중 · 수익 개선 판단 보류')+'</p></div>';
+}
+
+function intradayPaperView(s, esc) {
+  if(!s)return '<div class="paper-sleeve"><h3>장중 가상 자동운용 실험</h3><p>첫 장중 점검을 기다립니다.</p></div>';
+  var stamp=s.last_tick?new Date(s.last_tick):null;
+  var fresh=stamp&&!isNaN(stamp.getTime())&&Date.now()-stamp.getTime()>=0&&Date.now()-stamp.getTime()<=600000;
+  var ready=fresh&&s.valuation_status==='ok';
+  var won=function(v){return typeof v==='number'&&isFinite(v)?v.toLocaleString(undefined,{maximumFractionDigits:0})+'원':'평가 대기';};
+  var states={accepted:'접수',partially_filled:'부분 체결',filled:'체결 완료',cancelled:'취소',rejected:'거부'};
+  var orders=(s.orders||[]).map(function(o){return '<li>'+esc(o.code)+' '+(o.side==='buy'?'매수':'매도')+' '+Number(o.filled_qty||0)+'/'+Number(o.qty||0)+'주 · '+esc(states[o.status]||'확인 필요')+'</li>';}).join('');
+  var fills=(s.fills||[]).map(function(f){return '<li>'+esc(f.at)+' · '+esc(f.code)+' '+(f.side==='buy'?'매수':'매도')+' '+Number(f.qty||0)+'주 · '+won(f.price)+' · '+esc(f.price_model==='quoted_bid_ask'?'호가 기준':'추정 스프레드')+'</li>';}).join('');
+  return '<div class="paper-sleeve"><h3>장중 가상 자동운용 실험 · 별도 1,200만원</h3><p>'+esc(s.analysis_source||'')+'</p><p>최근 판단: '+esc(s.review_reason||'대기')+' · '+esc(s.status||'')+'</p>'+
+    '<p>평가 '+(ready?won(s.equity):'시세 검증 대기')+' · 손익 '+(ready?paperProfit(s.total_pnl,false):'평가 대기')+' · 실현 '+(ready?paperProfit(s.realized_pnl,false):'평가 대기')+'</p>'+
+    '<p>보유 '+((s.holdings||[]).map(function(h){return esc(h.code)+' '+Number(h.qty||0)+'주';}).join(', ')||'없음')+'</p>'+
+    '<details><summary>최근 주문·체결 보기</summary><h4>주문 상태</h4><ul>'+(orders||'<li>주문 없음</li>')+'</ul><h4>가상 체결</h4><ul>'+(fills||'<li>체결 없음</li>')+'</ul></details>'+
+    '<p class="ev">기존 2,000만원 계좌와 합산하지 않는 비교 실험입니다. 실제 호가·유동성 자료가 없어 편도 0.05% 추정 스프레드와 5분당 최대 120만원 가상 체결을 사용합니다. 매시간 AI 추가 호출·실제 주문은 하지 않습니다.</p></div>';
 }
 
   if(typeof document.createElement==='function')mountCompanySearch(D.company_research||{},esc,null);
   if($('reportLibrary')) $('reportLibrary').innerHTML=reportLibraryView(D.research_reports,esc);
   if($('longResearch')) $('longResearch').innerHTML=longResearchView(D.long_research,esc);
+  if($('mediumResearch')) $('mediumResearch').innerHTML=mediumResearchView(D.medium_research,esc);
   var PA=D.paper||null;
   if($('paperCompare'))$('paperCompare').innerHTML=paperComparisonView(D.paper_comparison,esc);
+  if($('paperShadowV2'))$('paperShadowV2').innerHTML=shadowV2View(D.paper_shadow_v2,esc);
+  if($('paperIntraday'))$('paperIntraday').innerHTML=intradayPaperView(D.paper_intraday,esc);
+  if($('usPaper')){
+    var U=D.us_paper, uv=U&&U.valuation||{}, usd=function(n){return typeof n==='number'&&isFinite(n)?'$'+n.toLocaleString(undefined,{maximumFractionDigits:2}):'평가 대기';};
+    $('usPaper').innerHTML=U?'<div class="kpis"><div class="kpi"><div class="l">별도 미국 가상자본</div><div class="v mono">'+usd(U.initial_cash)+'</div></div><div class="kpi"><div class="l">평가액</div><div class="v mono">'+(uv.status==='ok'?usd(uv.equity):'시세 검증 대기')+'</div></div><div class="kpi"><div class="l">실현손익</div><div class="v mono '+(U.realized_pnl>0?'up':U.realized_pnl<0?'down':'')+'">'+usd(U.realized_pnl)+'</div></div></div>'+
+      '<p>보유: '+esc((U.holdings||[]).map(function(h){return h.symbol+' '+h.qty+'주';}).join(', ')||'없음')+'</p>'+
+      '<p class="ev">'+esc(U.feed_note||'')+' · 마지막 평가 '+esc(U.last_tick||'대기')+'</p>'+
+      '<details><summary>최근 가상 거래</summary><ul>'+((U.recent_trades||[]).map(function(t){return '<li>'+esc(t.at)+' · '+esc(t.sleeve==='long'?'장기 기업분석':t.sleeve==='long_core'?'장기 기준 ETF':t.sleeve==='medium'?'중기':'단기')+' '+esc(t.symbol)+' '+esc(t.side==='buy'?'매수':'매도')+' '+Number(t.qty)+'주'+(t.side==='sell'?' · 실현 '+usd(t.realized_pnl):'')+'</li>';}).join('')||'<li>체결 대기</li>')+'</ul></details>':'<p class="ev">미국 모의계좌 공개 요약은 준비 중입니다. 데이터 이용권 확인 후 별도 게시됩니다.</p>';
+  }
   function won(v){return Number(v).toLocaleString(undefined,{maximumFractionDigits:0})+'원';}
   if(PA&&PA.portfolio_mode){
     var paperHTML=splitPaperView(PA,esc);$('paper').innerHTML=paperHTML;
@@ -941,7 +1425,7 @@ function paperComparisonView(c, esc) {
   } else $('paper').innerHTML = PA ? (PA.days===0?'<div class="ev">운용 시작 전 · 수익률 0%는 초기 상태입니다. 아직 모의 체결·평가 기록이 없습니다.</div>':'')+'<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">'+
     [['평가금액',won(PA.equity),pct(PA.total_return_pct)+' ('+(PA.pnl>=0?'+':'')+won(PA.pnl)+')',PA.total_return_pct>0?'up':PA.total_return_pct<0?'down':''],['시작 자금',won(PA.initial_cash),PA.days+'일 운용',''],['샤프 / MDD',(PA.sharpe_annual==null?'—':PA.sharpe_annual)+' / '+(PA.max_drawdown_pct==null?'—':PA.max_drawdown_pct+'%'),'승률 '+(PA.win_rate==null?'—':Math.round(PA.win_rate*100)+'%'),''],['거래',PA.trades+'건','비용 '+won(PA.fees),'']]
     .map(function(t){return '<div class="kpi"><div class="l">'+t[0]+'</div><div class="v mono '+t[3]+'" style="font-size:22px">'+t[1]+'</div><div class="d">'+t[2]+'</div></div>';}).join('')+'</div>'+
-    curve([{n:'가상 계좌',v:(PA.equity_curve||[]).map(function(x){return (x.equity/PA.initial_cash-1)*100;}),c:'var(--accent)'}])+
+    curve([{n:'가상 계좌',v:(PA.equity_curve||[]).map(function(x){return (x.equity/(x.contributed_capital||PA.initial_cash)-1)*100;}),c:'var(--accent)'}])+
     '<div class="tbl"><table><thead><tr><th>거래일</th><th class="num">목표</th><th class="num">평가금액</th><th class="num">일수익</th><th class="num">누적</th></tr></thead><tbody>'+
     (PA.recent_days||[]).slice(0,20).map(function(d){return '<tr><td>'+esc(d.date)+'</td><td class="num">'+(d.target_position>0?'롱':d.target_position<0?'쇼트':'현금')+' '+Math.round(Math.abs(d.target_position)*100)+'%</td><td class="num">'+won(d.equity)+'</td><td class="num '+(d.day_return_pct>=0?'up':'down')+'">'+pct(d.day_return_pct)+'</td><td class="num">'+pct(d.total_return_pct)+'</td></tr>';}).join('')+'</tbody></table></div>'+
     '<div class="ev">현금 '+won(PA.cash||0)+' · 보유 '+(Object.keys(PA.holdings||{}).length?Object.keys(PA.holdings).map(function(t){return (t.indexOf('069500')===0?'KODEX 200':'KODEX 인버스')+' '+PA.holdings[t]+'주';}).join(', '):'없음')+'</div>'+
@@ -955,6 +1439,7 @@ function paperComparisonView(c, esc) {
   $('agents').innerHTML=names.length?'<div class="tbl"><table><thead><tr><th>에이전트</th><th class="num">방향 적중</th><th class="num">근거 검증률</th></tr></thead><tbody>'+
     names.map(function(n){var a=ag[n];return '<tr><td>'+(AL[n]||esc(n))+'</td><td class="num">'+(a.total?frac(a.correct,a.total):'—')+'</td><td class="num">'+(a.evidence_total?frac(a.evidence_verified,a.evidence_total):'—')+'</td></tr>';}).join('')+
     '</tbody></table></div>':'<div class="empty">검증된 기록이 쌓이면 표시됩니다.</div>';
+  $('agents').innerHTML+='<p class="ev">확률이 기록된 날의 방향 일치 '+(st.probability_correct||0)+'/'+(st.probability_total||0)+'건 · 상승확률 50% 중립 '+(st.neutral_probability_count||0)+'건은 방향 채점 제외 · 확률 없는 과거 기록 '+(st.legacy_direction_count||0)+'건은 이 비율에서 제외합니다. 표본이 적어 성능을 확정할 수 없습니다.</p>';
 
   var cal=st.calibration;
   if(cal&&cal.n){
@@ -965,13 +1450,13 @@ function paperComparisonView(c, esc) {
   var failed=obs.filter(function(r){return r.correct===false;}).length;
   if(obs.length||archived.length||audit.unavailable){
     $('reviewNotice').hidden=false;
-    $('reviewNotice').innerHTML='정식 적중률은 채점 완료 기록만 집계합니다. 관찰 복기 '+obs.length+'건 (빗나감 '+failed+'건), 별도 보관 예측 '+archived.length+'건은 별도 표시합니다. <a href="#records">기록과 제외 사유 보기 →</a>'+(audit.unavailable?' · 일부 보관 기록을 읽지 못했습니다.':'');
+    $('reviewNotice').innerHTML='방향 일치율은 검증 완료 기록에서 상승확률 50% 중립을 제외합니다. 관찰 복기 '+obs.length+'건 (빗나감 '+failed+'건), 별도 보관 예측 '+archived.length+'건은 별도 표시합니다. <a href="#records">기록과 제외 사유 보기 →</a>'+(audit.unavailable?' · 일부 보관 기록을 읽지 못했습니다.':'');
   }
   $('reviewHistory').innerHTML=obs.map(function(r){return '<div class="audit-item"><b>'+esc(r.target_date)+' 관찰 결과 · '+(r.correct===false?'빗나감':r.correct===true?'일치':'미확인')+'</b><br/>예상 '+dir(r.direction)+' → 실제 '+dir(r.actual_direction)+'<br/><span class="ev">원래 예측 대상 '+esc(r.reviewed_record||'미기록')+' · 정식 채점 제외<br/>'+esc(r.note||'')+'</span></div>';}).join('')+
     archived.map(function(r){return '<div class="audit-item"><b>별도 보관 · '+esc(r.run_at||r.run_date)+'</b><br/>대상 '+esc(r.target_date)+' · 예상 '+dir(r.direction)+'<br/><span class="ev">대체 기록: '+esc(r.superseded_by||'미기록')+' · 정식 통계 제외</span></div>';}).join('')+(audit.unavailable?'<div class="empty">일부 보관 기록을 읽지 못했습니다.</div>':(!obs.length&&!archived.length?'<div class="empty">별도 기록 없음</div>':''));
   var recs=D.records||[];
   $('records').innerHTML=recs.length?'<div class="tbl"><table><thead><tr><th>대상 거래일</th><th>예측</th><th>신뢰도</th><th>실제</th><th>결과</th></tr></thead><tbody>'+
-    recs.map(function(x){return '<tr><td class="mono">'+esc(x.actual_session_date||x.target_date)+'</td><td>'+dir(x.direction)+(x.up_probability!=null?' <span class="ev">'+Math.round(x.up_probability)+'%</span>':'')+'</td><td>'+esc(x.confidence||'-')+'</td><td>'+(x.verified?dir(x.actual_direction):'<span class="empty">대기</span>')+'</td><td>'+(x.verified?(x.correct?'<span class="chip ok">적중</span>':'<span class="chip bad">빗나감</span>'):'—')+'</td></tr>';}).join('')+
+    recs.map(function(x){var neutral=x.up_probability===50;return '<tr><td class="mono">'+esc(x.actual_session_date||x.target_date)+'</td><td>'+(neutral?'중립':dir(x.direction))+(x.up_probability!=null?' <span class="ev">'+Math.round(x.up_probability)+'%</span>':'')+'</td><td>'+esc(x.confidence||'-')+'</td><td>'+(x.verified?dir(x.actual_direction):'<span class="empty">대기</span>')+'</td><td>'+(x.verified?(neutral?'<span class="chip">방향 채점 제외</span>':x.correct?'<span class="chip ok">방향 일치</span>':'<span class="chip bad">방향 불일치</span>'):'—')+'</td></tr>';}).join('')+
     '</tbody></table></div>':'<div class="empty">기록 없음</div>';
 })();
 
@@ -1048,11 +1533,13 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
     <nav class="tabs" id="tabs">
       <a href="#today" data-tab="today" class="active"><i>◎</i><span class="l">오늘의 예측</span><span class="s">예측</span></a>
       <a href="#stocks" data-tab="stocks"><i>▦</i><span class="l">추천 분석 종목</span><span class="s">종목</span></a>
-      <a href="#process" data-tab="process"><i>⋯</i><span class="l">분석 과정</span><span class="s">과정</span></a>
+      <a href="#process" data-tab="process"><i>◇</i><span class="l">구조·분석 과정</span><span class="s">구조</span></a>
       <a href="#performance" data-tab="performance"><i>↗</i><span class="l">성과·수익률</span><span class="s">성과</span></a>
       <a href="#reports" data-tab="reports"><i>▤</i><span class="l">팀 보고서</span><span class="s">보고서</span></a>
       <a href="#long" data-tab="long"><i>長</i><span class="l">장기 투자</span><span class="s">장기</span></a>
+      <a href="#medium" data-tab="medium"><i>中</i><span class="l">중기 투자</span><span class="s">중기</span></a>
       <a href="#paper" data-tab="paper"><i>₩</i><span class="l">모의투자 수익률</span><span class="s">모의투자</span></a>
+      <a href="#us" data-tab="us"><i>$</i><span class="l">미국 모의투자</span><span class="s">미국</span></a>
       <a href="#company" data-tab="company" class="company-search-link"><i>⌕</i><span class="l">기업 심층분석 검색</span><span class="s">검색</span></a>
       <a href="#records" data-tab="records"><i>≡</i><span class="l">예측 기록</span><span class="s">기록</span></a>
     </nav>
@@ -1067,7 +1554,7 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
     <div class="hero hero-3">
       <div style="display:grid;gap:20px;min-width:0">
       <section class="hero-card" style="gap:12px"><h2>오늘의 KOSPI 예측</h2><div id="pred" style="display:grid;gap:12px"></div></section>
-      <section class="hero-card" style="gap:10px"><div class="chart-head"><span class="lbl">KOSPI</span><span class="px mono" id="kPx">—</span><span class="mono" id="kChg"></span><span class="lbl" id="kDate"></span><span class="aitag" id="kAi"></span></div>
+      <section class="hero-card" style="gap:10px"><div class="chart-head"><span class="lbl">KOSPI</span><span class="px mono" id="kPx">—</span><span class="mono" id="kChg"></span><span class="lbl" id="kDate"></span><span class="aitag" id="kAi"></span><button type="button" class="chart-refresh" id="btnRefreshKospi" aria-label="최신 게시본에서 KOSPI 지수 새로고침">↻ 지수 새로고침</button></div>
         <div class="ev" id="quoteNotice">게시 시점의 종가 스냅샷입니다. 공유 주소는 5분마다 게시본을 확인하며, 실시간 시세 조회는 하지 않습니다.</div>
         <div id="kChart"><div class="empty">이 스냅샷에는 KOSPI 시세가 없습니다 (다음 분석부터 포함).</div></div>
         <div class="legend"><span><i style="background:var(--chart-price)"></i><span id="priceSeriesLabel">종가</span></span><span><i class="sw20"></i>20일선</span><span><i class="sw60"></i>60일선</span><span style="color:var(--ink-2)">AI ▲/▼ = AI 예측 방향</span></div>
@@ -1076,6 +1563,9 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
       </div>
       <section class="board" id="board"></section>
     </div>
+    <section class="home-guide" aria-labelledby="homeGuideTitle"><h2 id="homeGuideTitle">시그널랩, 한 주소에서 계속 보세요</h2><p>이 주소의 내용은 예약 갱신이 성공하면 최신 게시본으로 바뀝니다. 아래 메뉴에서 예측·모의투자·보고서·프로그램 구조를 바로 볼 수 있습니다. 공개 화면은 읽기 전용입니다.</p>
+      <div class="home-guide-links"><a href="#today"><b>오늘의 예측 ↗</b><small>방향·확률·근거</small></a><a href="#stocks"><b>추천 종목 ↗</b><small>종목별 흐름과 분석</small></a><a href="#paper"><b>모의투자 ↗</b><small>체결·실현손익 확인</small></a><a href="#reports"><b>팀 보고서 ↗</b><small>단기·장기 판단 본문</small></a><a href="#process"><b>프로그램 구조 ↗</b><small>그림으로 전체 흐름 보기</small></a></div>
+    </section>
     <div class="audit-note" id="reviewNotice" hidden></div>
     <div class="kpis" id="kpis" style="grid-template-columns:repeat(4,1fr)"></div>
     <section><h2>검증 · QA</h2><div id="qa"></div></section>
@@ -1085,6 +1575,24 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
       <h2 style="margin-top:20px">추천 분석 종목 <span class="h2-sub">종목을 눌러 주가 흐름과 판단 근거 보기</span></h2><div class="stocks" id="watch"></div></section>
   </div>
   <div class="panel" id="tab-process">
+    <section class="architecture-intro" aria-labelledby="architectureHeading">
+      <h2 id="architectureHeading">시그널랩은 어떻게 움직이나요?</h2>
+      <p>시장 자료와 AI 판단을 분리하고, 검증된 계획만 가상계좌에 반영합니다. 아래 화살표는 자료와 판단의 흐름이며 실제 주식 주문은 뜻하지 않습니다.</p>
+      <ol class="architecture-map">
+        <li><em>01 · 입력</em><b>시장·뉴스·공시</b><small>KOSPI200·ETF·종목 시세, 국내외 뉴스, 기업 재무와 OpenDART 공시를 수집합니다.</small></li>
+        <li><em>02 · 분석</em><b>분리된 AI 팀</b><small>아침 단기팀, 장기 기업팀, 장중 이벤트팀이 목적과 호출 예산을 나눠 판단합니다.</small></li>
+        <li><em>03 · 검증</em><b>근거·QA·위험</b><small>자료 ID, 수치, 반대 의견, 대상일, ETF/종목별 규칙과 위험 한도를 확인합니다.</small></li>
+        <li><em>04 · 집행</em><b>가상계좌만</b><small>별도 작업이 최신 시세와 승인 계획을 다시 검사한 뒤 모의 체결·손익을 기록합니다.</small></li>
+        <li><em>05 · 공유</em><b>읽기 전용 홈페이지</b><small>검사된 요약만 이 고정 주소에 게시합니다. API 키와 실행 권한은 포함하지 않습니다.</small></li>
+      </ol>
+      <div class="architecture-teams">
+        <article><b>아침 단기팀 · 핵심 9역할</b><p>4명 분석가 → Bull/Bear 토론 → 중재자 → 리스크 매니저 → 트레이더. 근거 QA와 상위 검증은 조건에 따라 추가됩니다.</p></article>
+        <article><b>장기 기업팀 · 3역할</b><p>기업가치 분석가와 독립 반대 검토자가 같은 자료를 따로 본 뒤 운용 담당이 배분을 판단합니다. 조사 후보와 매수 승인은 다릅니다.</p></article>
+        <article><b>장중 단기팀 · 2역할 재판단</b><p>5분 시세·15분 뉴스 감시 중 이벤트가 생기면 트레이더와 반대검토자를 호출합니다. 09:20부터 약 70분마다 또는 사건 발생 시 하루 최대 5회 재검토하며, 승인 계획은 20분만 유효합니다.</p></article>
+      </div>
+      <details><summary>자동화와 한계 자세히 보기</summary><p>원화 2,000만원 가상자본금은 단기 1,000만원, 중기 200만원, 장기 800만원으로 분리됩니다. 아침 분석, 5분 모의계좌, 장중 감시, 60분 장기 조사, 5분 공개 갱신 작업은 각각 독립적입니다. 장중 새 매매는 자료 신선도·QA·손실 한도를 통과해야 합니다.</p><p>공개 페이지의 숫자는 마지막 성공 게시 시점의 스냅샷입니다. 예약작업·PC·네트워크가 멈추면 갱신되지 않습니다. 미국 USD 모의운용은 별도 경로이며 선물 직접 데이터와 실주문 기능은 연결되지 않았습니다.</p></details>
+      <p><a href="#reports">팀 보고서 보기 →</a> · <a href="#paper">모의 체결·손익 보기 →</a></p>
+    </section>
     <div class="grid">
       <div style="display:grid;gap:20px;min-width:0">
         <section><h2>분석가 4명 판단</h2><div id="analysts"></div></section>
@@ -1097,7 +1605,7 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
       </div>
     </div>
   </div>
-  <div class="panel" id="tab-performance"><section><h2>시장 전망 평가 · KOSPI 기준</h2><p>이 화면의 기존 신호 가정성과는 ETF 하루 수익률 또는 지수 근사치로 계산한 사후 값이며, 실제 ETF 모의계좌 수익이 아닙니다. 실제 체결 이후 비용 차감 손익과 ETF 운용 성과는 모의투자 수익률에서 별도로 확인하세요. 과거 KOSPI 채점 기록은 그대로 보존합니다.</p></section>
+  <div class="panel" id="tab-performance"><section><h2>시장 전망 평가 · KOSPI 기준</h2><p>이 화면의 기존 신호 가정성과는 ETF 하루 수익률 또는 지수 근사치로 계산한 사후 값이며, 실제 ETF 모의계좌 수익이 아닙니다. 실제 체결 이후 비용 차감 손익과 ETF 운용 성과는 모의투자 수익률에서 별도로 확인하세요. 과거 KOSPI 채점 기록은 그대로 보존합니다.</p><div id="perfAudit"></div></section>
     <section><h2>과거 전략 성과 <span class="h2-sub">채점 완료 기록 · 누적 · 비용 차감</span></h2><div id="ret"></div></section>
     <div class="grid">
       <section><h2>AI vs 단순 규칙</h2><div id="base"></div></section>
@@ -1106,9 +1614,11 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
   </div>
   <div class="panel" id="tab-reports"><section><h2>투자팀 리서치 라이브러리</h2><div id="reportLibrary"></div></section></div>
   <div class="panel" id="tab-long"><section><h2>장기 투자팀 보고서</h2><div id="longResearch" style="display:grid;gap:12px"></div></section></div>
+  <div class="panel" id="tab-medium"><section><h2>중기 투자팀 보고서</h2><div id="mediumResearch"></div></section></div>
   <div class="panel" id="tab-paper">
-    <section><h2>모의투자 수익률 <span class="h2-sub">가상자본금 2,000만원 · 장기 800만원 / 단기·현금 1,200만원 · 조회 시점 가격으로 모의 체결</span></h2><div id="paper" style="display:grid;gap:14px"></div><div id="paperCompare" style="margin-top:14px"></div></section>
+    <section><h2>모의투자 수익률 <span class="h2-sub">기존 2,000만원 + 가상 추가 입금 1,000만원 · 단기 1,000만원 / 레버리지 1,000만원 / 중기 200만원 / 장기 800만원</span></h2><div id="paper" style="display:grid;gap:14px"></div><div id="paperShadowV2" style="margin-top:14px"></div><div id="paperCompare" style="margin-top:14px"></div><div id="paperIntraday" style="margin-top:14px"></div></section>
   </div>
+  <div class="panel" id="tab-us"><section><h2>미국 모의투자 <span class="h2-sub">달러 별도 계좌 · IEX 시세 기반 추정 체결</span></h2><div id="usPaper"></div><p class="ev">국내 2,000만원 계좌와 합산하지 않습니다. 공개 페이지에는 개별 호가·원시 시세와 API 키가 포함되지 않습니다.</p></section></div>
   <div class="panel" id="tab-company"><section><h2>기업 심층분석</h2><p class="ev">기업명 또는 종목코드로 검색하세요. 현재 관리 중인 코스피 시가총액 상위 100개 기업을 지원합니다.</p><label class="company-search-box"><span aria-hidden="true">⌕</span><input id="companyQuery" type="search" maxlength="80" placeholder="기업명 또는 종목코드 검색" aria-label="기업명 또는 종목코드 검색"></label><div id="companyResults" class="company-results"></div><div id="companyBody"><p>기업을 선택하면 저장된 심층분석을 볼 수 있습니다.</p></div></section></div>
   <div class="panel" id="tab-records">
     <section><h2>정식 예측 기록</h2><div id="records"></div></section>
@@ -1125,11 +1635,13 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
 <script>
 (function(){
   var tabs=document.querySelectorAll('#tabs a');
+  if(location.search)history.replaceState(null,'',location.pathname+location.hash);
   function go(n){var ok=false;tabs.forEach(function(a){if(a.dataset.tab===n)ok=true;});if(!ok)n='today';
     tabs.forEach(function(a){a.classList.toggle('active',a.dataset.tab===n);});
     document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('active',p.id==='tab-'+n);});}
   go((location.hash||'').replace('#',''));
-  document.getElementById('brandHome').addEventListener('click',function(e){e.preventDefault();location.hash='today';go('today');window.scrollTo({top:0,left:0,behavior:'instant'});});
+  document.getElementById('brandHome').addEventListener('click',function(e){e.preventDefault();go('today');history.replaceState(null,'',location.pathname+'#today');var root=document.documentElement,previous=root.style.scrollBehavior;root.style.scrollBehavior='auto';window.scrollTo(0,0);requestAnimationFrame(function(){window.scrollTo(0,0);root.style.scrollBehavior=previous;});});
+  document.getElementById('btnRefreshKospi').addEventListener('click',function(){this.disabled=true;this.textContent='게시본 확인 중…';var url=new URL(location.href);url.searchParams.set('refresh',String(Date.now()));location.assign(url.href);});
   var tbs=document.querySelectorAll('.tbl table');
   for(var ti=0;ti<tbs.length;ti++){var hs=[],ths=tbs[ti].querySelectorAll('thead th');for(var hi=0;hi<ths.length;hi++)hs.push(ths[hi].textContent.trim());
     var trs=tbs[ti].querySelectorAll('tbody tr');for(var ri=0;ri<trs.length;ri++){var tds=trs[ri].children;for(var ci=0;ci<tds.length;ci++){if(hs[ci]&&!tds[ci].hasAttribute('colspan'))tds[ci].setAttribute('data-label',hs[ci]);}}}
@@ -1149,7 +1661,13 @@ _BODY = """<title>시그널랩 | Signal Lab</title>
 def render_fragment(data: dict) -> str:
     # Only the approved simulated-account fields may enter a shared report.
     data = {**data, "paper": _pick(data.get("paper") or {}, _PAPER_FIELDS) or None,
-            "paper_comparison": _pick(data.get("paper_comparison") or {}, _COMPARISON_FIELDS) or None}
+            "performance_evaluation": _evaluation_public(data.get("performance_evaluation")),
+            "paper_comparison": _pick(data.get("paper_comparison") or {}, _COMPARISON_FIELDS) or None,
+            "paper_shadow_v2": _pick(data.get("paper_shadow_v2") or {}, _SHADOW_V2_FIELDS) or None,
+            "paper_opportunity": _pick(data.get("paper_opportunity") or {}, _OPPORTUNITY_FIELDS) or None,
+            "paper_intraday": _sanitize_intraday(data.get("paper_intraday")),
+            "etf_basket": _sanitize_etf_basket(data.get("etf_basket")),
+            "us_paper": _sanitize_us_paper(data.get("us_paper")) if os.environ.get("US_PUBLIC_SUMMARY", "false").lower() == "true" else None}
     # </script> 탈출 방지: JSON 안의 '<'를 유니코드 이스케이프
     data_json = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
     out = _BODY.replace("{css}", _CSS).replace("{js}", _JS).replace("{data}", data_json)

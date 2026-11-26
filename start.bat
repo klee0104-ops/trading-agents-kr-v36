@@ -67,7 +67,7 @@ goto menu
 
 :do_setkey
 set "provider="
-echo   gemini / anthropic = AI 키,  naver_id / naver_secret = 네이버 검색 API(뉴스, ncloud.com NAVER API HUB)
+echo   gemini / anthropic / dart = AI 키,  naver_id / naver_secret = 네이버 검색 API(뉴스, ncloud.com NAVER API HUB)
 set /p provider="provider 입력 (기본 gemini): "
 if "%provider%"=="" set "provider=gemini"
 python cli.py set-key %provider%

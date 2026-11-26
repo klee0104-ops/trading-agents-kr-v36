@@ -110,7 +110,8 @@ def _q_line(q, as_of: str) -> str:
 
 
 def build_registry(snapshot=None, quant: Optional[dict] = None, news_titles: Optional[list[str]] = None,
-                   news_channel: Optional[str] = None) -> list[dict]:
+                   news_channel: Optional[str] = None, ai_titles: Optional[list[str]] = None,
+                   disclosure_titles: Optional[list[str]] = None, base_rate_lines: Optional[list[str]] = None) -> list[dict]:
     """오늘 쓰는 근거 자료 목록. 각 항목 {id, kind, text, source, date, refs, group}."""
     reg: list[dict] = []
     as_of = str(getattr(snapshot, "as_of", "") or "")
@@ -146,6 +147,27 @@ def build_registry(snapshot=None, quant: Optional[dict] = None, news_titles: Opt
         reg.append({"id": f"N{i}", "kind": "N", "group": "news", "name": p["stock"], "text": t,
                     "source": f"{p['press'] or '매체 미상'} (수집 경로: {channel})", "press": p["press"] or "매체 미상",
                     "date": p["date"], "refs": []})
+    # (V3.36) AI·반도체 업계 소식(공식 발표·SEC 공시·커뮤니티) — 뉴스 ID(N)를 이어서 붙이고 그룹은 따로 둔다
+    base = len(news_titles or [])
+    for j, t in enumerate(ai_titles or [], 1):
+        t = sanitize_external(t)
+        p = parse_news_title(t)
+        reg.append({"id": f"N{base + j}", "kind": "N", "group": "ai_industry", "name": "AI업계", "text": t,
+                    "source": p["press"] or "업계 소식", "press": p["press"] or "업계 소식",
+                    "date": p["date"], "refs": []})
+    # (V3.37) 개장 전 대형주 공시(OpenDART 제목) — 뉴스 ID 를 이어서, 그룹 disclosure
+    base = len(news_titles or []) + len(ai_titles or [])
+    for j, t in enumerate(disclosure_titles or [], 1):
+        t = sanitize_external(t)
+        p = parse_news_title(t)
+        reg.append({"id": f"N{base + j}", "kind": "N", "group": "disclosure", "name": p["stock"], "text": t,
+                    "source": "OpenDART 공시 목록 (금융감독원)", "press": "OpenDART 공시",
+                    "date": p["date"], "refs": []})
+    # (V3.37) 기준 비율 — 정량 ID(Q)를 이어서, 그룹 base_rate
+    q_next = sum(e["kind"] == "Q" for e in reg)
+    for j, line in enumerate(base_rate_lines or [], 1):
+        reg.append({"id": f"Q{q_next + j}", "kind": "Q", "group": "base_rate", "name": "기준비율", "text": line,
+                    "source": "Yahoo Finance 일봉(^SOX·^KS11)으로 코드 계산", "date": "", "refs": []})
     used = sorted({r for e in reg for r in e["refs"]}, key=lambda x: int(x[1:]))
     for rid in used:
         ref = REFERENCES[rid]
@@ -198,7 +220,7 @@ def _nums(text: str) -> list[tuple[float, str]]:
 
 
 # (V3.28) 프롬프트가 판단 기준으로 알려준 임계값(예: "SOX ±1.5% 이상", "±0.5% 이내")은 자료 인용이 아니므로 허용
-RULE_THRESHOLDS = (0.5, 1.5)
+RULE_THRESHOLDS = (0.13, 0.3, 0.5, 1.5)  # (V3.30) 장중 비용 0.13%, 소폭 등락 ±0.3% 기준 추가
 
 
 def _numbers_match(claim: str, sources: list[str]) -> Optional[str]:

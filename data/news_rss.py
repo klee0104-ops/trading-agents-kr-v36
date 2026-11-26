@@ -90,13 +90,18 @@ _KST = _tz(timedelta(hours=9))
 
 
 def fetch_google_news(name: str, start: date, end: date, query: Optional[str] = None,
-                      sleep_sec: float = 0.2, timeout: int = 10) -> list[NewsItem]:
+                      sleep_sec: float = 0.2, timeout: int = 10,
+                      locale: str = "KR", require_name: bool = True) -> list[NewsItem]:
     q = query or name
-    resp = requests.get(GOOGLE_NEWS_RSS, params={"q": q, "hl": "ko", "gl": "KR", "ceid": "KR:ko"},
+    locales = {"KR": ("ko", "KR", "KR:ko"), "US": ("en-US", "US", "US:en")}
+    if locale not in locales:
+        raise ValueError("Unsupported news locale")
+    hl, gl, ceid = locales[locale]
+    resp = requests.get(GOOGLE_NEWS_RSS, params={"q": q, "hl": hl, "gl": gl, "ceid": ceid},
                         headers=_HEADERS, timeout=timeout)
     resp.raise_for_status()
     time.sleep(sleep_sec)
-    return parse_rss(resp.text, name, start, end, require_name=True)
+    return parse_rss(resp.text, name, start, end, require_name=require_name)
 
 
 def fetch_press_feeds(timeout: int = 10) -> dict[str, str]:

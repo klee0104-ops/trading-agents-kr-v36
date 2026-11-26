@@ -37,18 +37,59 @@ def test_independent_roles_three_calls_and_valid_plan():
     assert '별도 두 역할' in m.calls[2][1]
     assert all(x[2]['use_web_search'] is False for x in m.calls)
 
-@pytest.mark.parametrize('fault',['citation','concentration','negative_fcf','critic_reject','future_price','unknown_code','duplicate'])
+@pytest.mark.parametrize('fault',['citation','concentration','unknown_code','duplicate'])
 def test_fail_closed_team(fault):
     m=Model();f=facts()
     if fault=='citation':m.responses[0]['stocks'][0]['points']=['인용 없음']
     if fault=='concentration':m.responses[2]['allocations'][0]['weight']=.9
-    if fault=='negative_fcf':f[0]['eligible']=False
-    if fault=='critic_reject':m.responses[1]['stocks'][0]['stance']='reject'
-    if fault=='future_price':m.responses[2]['allocations'][0]['buy_below']=100
     if fault=='unknown_code':m.responses[2]['allocations'][0]['code']='FAKE'
     if fault=='duplicate':m.responses[2]['allocations']*=2
     r=run_team(m,f,news(),NOW)
     assert r['status']=='held' and not r['allocations'] and len(m.calls)<=3
+
+
+@pytest.mark.parametrize('fault,reason',[
+    ('negative_fcf','fundamental_or_critic_block'),
+    ('critic_reject','fundamental_or_critic_block'),
+    ('future_price','price_above_starter_limit'),
+])
+def test_invalid_stock_allocation_is_excluded_without_buy(fault,reason):
+    m=Model();f=facts()
+    if fault=='negative_fcf':f[0]['eligible']=False
+    if fault=='critic_reject':m.responses[1]['stocks'][0]['stance']='reject'
+    if fault=='future_price':m.responses[2]['allocations'][0]['buy_below']=100
+    r=run_team(m,f,news(),NOW)
+    assert r['status']=='approved' and r['allocations'][0]['weight']==0
+    assert r['allocation_adjustments'][0]['reason']==reason
+    gate=decision({'report':r,'news':news(),'alerts':[]},NOW)
+    assert tick(fresh(NOW),None,quotes(),NOW,long_report=gate)['trades']==[]
+
+
+def test_valid_allocation_survives_other_stocks_bad_price():
+    m=Model()
+    m.responses[-1]['allocations'].append({'code':'000660','weight':.2,'buy_below':100,
+                                           'valuation_basis':['가치평가 검토 [M2]']})
+    r=run_team(m,facts(),news(),NOW)
+    assert r['status']=='approved'
+    assert [(a['code'],a['weight']) for a in r['allocations']]==[('005930',.25),('000660',0)]
+    gate=decision({'report':r,'news':news(),'alerts':[]},NOW)
+    q=quotes();q.pop('000660')  # Excluded stock must not be a required buy quote.
+    filled=tick(fresh(NOW),None,q,NOW,long_report=gate)
+    assert [t['ticker'] for t in filled['trades']]==['005930']
+
+
+def test_cited_eligible_proposal_above_discount_limit_gets_five_percent_starter():
+    f=facts();f[0]['metrics']['pb']=2.5
+    r=run_team(Model(),f,news(),NOW)
+    assert r['status']=='approved' and r['allocations'][0]['weight']==.05
+    assert r['allocations'][0]['entry_tier']=='starter'
+    assert r['allocation_adjustments'][0]['requested_weight']==.25
+    gate=decision({'report':r,'news':news(),'alerts':[]},NOW)
+    filled=tick(fresh(NOW),None,quotes(),NOW,long_report=gate)
+    assert len(filled['trades'])==1 and filled['trades'][0]['ticker']=='005930'
+    assert filled['trades'][0]['qty']*filled['trades'][0]['price']<=400_000
+    later=NOW+timedelta(minutes=5)
+    assert len(tick(filled,None,quotes(later),later,long_report=gate)['trades'])==1
 
 def test_incomplete_inputs_no_model_calls():
     m=Model();f=facts();f[0]['status']='unavailable'
@@ -160,7 +201,8 @@ def test_missing_eps_keeps_research_data_but_forbids_buy():
     from agents.long_team import research_ready
     f=facts();f[0].update(status='insufficient',eligible=False,missing=['EPS missing']);f[0]['metrics']['ttm_eps']=None;f[0]['metrics']['pe']=None
     assert research_ready(f[0])
-    assert run_team(Model(),f,news(),NOW)['status']=='held'
+    skipped=run_team(Model(),f,news(),NOW)
+    assert skipped['status']=='approved' and not any(a['weight'] for a in skipped['allocations'])
     m=Model();m.responses[-1]['allocations']=[]
     report=run_team(m,f,news(),NOW)
     assert report['status']=='approved' and report['allocations']==[] and len(report['roles'])==3

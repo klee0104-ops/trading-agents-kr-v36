@@ -14,6 +14,14 @@ from typing import Optional
 DEFAULT_PATH = "./lessons.json"
 
 
+def _support_text(s) -> str:
+    if not isinstance(s, dict):
+        return ""
+    d = {"up": "상승", "down": "하락"}.get(s.get("direction"), "")
+    base = f"비슷한 과거 {s.get('n', 0)}일 중 {s.get('match', 0)}일 실제 {d}" if s.get("n") else "비슷한 과거 사례 없음"
+    return f" [{'검증된 패턴' if s.get('status') == 'confirmed' else '관찰(규칙 아님)'} · {base}]"
+
+
 def situation_tags(market_analysis: dict | None, quant: dict | None, prediction: dict | None,
                    us_indices: list[dict] | None = None) -> list[str]:
     """상황 태그. 저장 때와 검색 때 같은 함수를 써서 어휘를 맞춘다."""
@@ -29,6 +37,7 @@ def situation_tags(market_analysis: dict | None, quant: dict | None, prediction:
     for k in ("rsi", "macd", "ma", "flow", "momentum"):
         if lab.get(k):
             tags.append(f"{k}:{lab[k]}")
+    tags += [t for t in ((quant or {}).get("special_tags") or []) if isinstance(t, str)]  # (V3.37) 특수 상황
     p = prediction or {}
     if p.get("direction"):
         tags.append(f"예측:{p['direction']}")
@@ -84,6 +93,10 @@ class LessonStore:
         for r in self._read():
             if as_of is not None and r.get("target_date", "") >= str(as_of):
                 continue
+            # A 50% forecast carried no directional conviction. Keep its
+            # record, but do not recycle a no-trade observation as a win.
+            if type(r.get("up_probability")) in (int, float) and r["up_probability"] == 50 and r.get("strategy_return_pct") is None:
+                continue
             overlap = len(today & set(r.get("tags") or []))
             if overlap == 0 and today:
                 continue
@@ -94,16 +107,52 @@ class LessonStore:
         return [r for _, _, r in scored[:n]]
 
 
+_PRED_TAGS = ("예측:", "전망:")
+
+
+def lesson_support(lesson: dict, records: list[dict], as_of: Optional[str] = None) -> dict:
+    """(V3.37) 하루짜리 교훈이 '규칙'인지 검사: 그날과 상황이 비슷한 다른 검증일 중 실제 결과가
+    교훈이 가리키는 방향(그날 실제 방향)과 같았던 비율. 예측·전망 태그는 비교에서 뺀다."""
+    key = {t for t in (lesson.get("tags") or []) if not t.startswith(_PRED_TAGS)}
+    want = lesson.get("actual_direction")
+    if not key or want not in ("up", "down"):
+        return {"n": 0, "match": 0, "status": "observation"}
+    need = max(3, -(-len(key) * 6 // 10))  # 핵심 태그 60% 이상 겹침(최소 3개)
+    similar = [r for r in records or [] if r.get("verified") and r.get("actual_direction") in ("up", "down")
+               and r.get("target_date") != lesson.get("target_date")
+               and (as_of is None or str(r.get("target_date", "")) < str(as_of))
+               and len(key & set(r.get("situation_tags") or [])) >= need]
+    n = len(similar)
+    m = sum(r["actual_direction"] == want for r in similar)
+    status = ("confirmed" if n >= 3 and m / n >= 0.6 else "contradicted" if n >= 3 and m / n <= 0.4
+              else "observation")
+    return {"n": n, "match": m, "status": status, "direction": want}
+
+
+def annotate_lessons(lessons: list[dict], records: list[dict], as_of: Optional[str] = None) -> list[dict]:
+    """교훈마다 근거 표본을 붙이고, 반박된 교훈은 뺀다."""
+    out = []
+    for r in lessons or []:
+        s = lesson_support(r, records, as_of)
+        if s["status"] == "contradicted":
+            continue
+        out.append({**r, "support": s})
+    return out
+
+
 def build_lessons_text(lessons: list[dict]) -> str:
     if not lessons:
         return ""
-    lines = ["\n[복기 교훈 — 과거에 비슷한 상황에서 틀렸거나 손실 난 날의 기록. 같은 실수를 반복하지 마세요]"]
+    lines = ["\n[복기 교훈 — 과거에 비슷한 상황에서 틀렸거나 손실 난 날의 기록. 같은 실수를 반복하지 마세요]",
+             "(V3.37) 교훈마다 '비슷한 과거 n일 중 m일'이 붙어 있습니다. '관찰'은 한두 번뿐인 사례라 규칙으로 쓰지 말고 참고만 하세요."]
     for r in lessons:
-        res = "적중" if r.get("correct") else "빗나감"
+        neutral = type(r.get("up_probability")) in (int, float) and r["up_probability"] == 50
+        res = "중립·방향 채점 제외" if neutral else ("적중" if r.get("correct") else "빗나감")
         ret = r.get("strategy_return_pct")
         ret_txt = f", 수익 {ret:+.2f}%" if isinstance(ret, (int, float)) else ""
         lines.append(f"- {r.get('target_date')} 예측 {r.get('direction')} → 실제 {r.get('actual_direction')} ({res}{ret_txt}): "
                      f"{r.get('lesson', '')}"
-                     + (f" [원인: {r['cause']}]" if r.get("cause") else ""))
+                     + (f" [원인: {r['cause']}]" if r.get("cause") else "")
+                     + _support_text(r.get("support")))
     lines.append("교훈은 참고용입니다. 오늘 데이터가 다르면 오늘 데이터를 우선하세요.")
     return "\n".join(lines)

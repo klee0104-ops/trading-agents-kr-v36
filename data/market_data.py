@@ -12,6 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from typing import Optional
+import json
+import math
+import os
+from pathlib import Path
 
 
 US_TICKERS = {
@@ -68,6 +72,41 @@ class MarketDataProvider:
     def __init__(self, backtest_mode: bool = False):
         self.backtest_mode = backtest_mode
         self._cache: dict = {}  # 백테스트 중 같은 지수를 매일 다시 받지 않도록 (ticker -> DataFrame)
+        self.us_close_cache_path = Path(os.environ.get("US_INDEX_CLOSE_CACHE_PATH", "us_index_close_cache.json"))
+
+    @staticmethod
+    def _weekday_steps(earlier: date, later: date) -> int:
+        """두 날짜 사이에 있는 평일 수. 휴장일은 알 수 없으므로 누락 때 보수적으로 중단한다."""
+        from datetime import timedelta
+        count = 0
+        day = earlier + timedelta(days=1)
+        while day <= later:
+            count += day.weekday() < 5
+            day += timedelta(days=1)
+        return count
+
+    def _read_us_closes(self) -> dict:
+        if self.backtest_mode:
+            return {}
+        try:
+            data = json.loads(self.us_close_cache_path.read_text(encoding="utf-8"))
+            return data.get("sessions", {}) if data.get("schema") == 1 else {}
+        except (OSError, ValueError, TypeError, AttributeError):
+            return {}
+
+    def _save_us_closes(self, sessions: dict, session_date: str, quotes: list[IndexQuote]) -> None:
+        if self.backtest_mode:
+            return
+        saved = dict(sessions)
+        saved[session_date] = {q.name: q.value for q in quotes}
+        saved = {key: saved[key] for key in sorted(saved)[-7:]}
+        path = self.us_close_cache_path
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps({"schema": 1, "sessions": saved}, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def _download_cached(self, yf, ticker, start, end):
         """백테스트 모드에선 넓은 구간을 한 번만 받아두고 잘라 쓴다 (look-ahead는 호출부에서 차단)."""
@@ -122,6 +161,7 @@ class MarketDataProvider:
         # 백테스트하면 데이터가 비었다. 기준일(end) 기준으로 명시적 구간을 요청한다.
         # yfinance의 end는 배타적이라 하루를 더한다.
         from datetime import timedelta
+        previous_sessions = self._read_us_closes()
         for name, ticker in US_TICKERS.items():
             hist = self._download_cached(yf, ticker, end - timedelta(days=190), end + timedelta(days=1))
             if hist.empty or len(hist) < 2:
@@ -132,8 +172,26 @@ class MarketDataProvider:
                 if len(hist) < 2:
                     raise DataAccessError(f"{name}: as_of_date 이전 데이터가 부족합니다 (look-ahead 방지)")
 
-            close = hist["Close"].squeeze()
-            change_pct = float((close.iloc[-1] / close.iloc[-2] - 1) * 100)
+            close = hist["Close"].squeeze().dropna()
+            if len(close) < 2:
+                raise DataAccessError(f"{name}: 유효 종가가 부족합니다")
+            current_date, yahoo_prev_date = close.index[-1].date(), close.index[-2].date()
+            prev_value = float(close.iloc[-2])
+            if self._weekday_steps(yahoo_prev_date, current_date) > 1:
+                candidates = [(date.fromisoformat(day), values.get(name)) for day, values in previous_sessions.items()
+                              if isinstance(values, dict) and yahoo_prev_date < date.fromisoformat(day) < current_date]
+                candidates = [(day, value) for day, value in candidates
+                              if self._weekday_steps(day, current_date) == 1
+                              and isinstance(value, (int, float)) and math.isfinite(value) and value > 0]
+                if not candidates:
+                    raise DataAccessError(f"{name}: {yahoo_prev_date}~{current_date} 사이 미국장 종가 누락; 전일 등락률 계산 보류")
+                prior_date, prev_value = max(candidates)
+                # 보완한 종가를 기술 지표에도 반영한다.
+                import pandas as pd
+                close = close.copy()
+                close.loc[pd.Timestamp(prior_date)] = prev_value
+                close = close.sort_index()
+            change_pct = float((float(close.iloc[-1]) / prev_value - 1) * 100)
             features = compute_indicators(close)
             quotes.append(IndexQuote(
                 name=name,
@@ -145,6 +203,10 @@ class MarketDataProvider:
                 macd_hist=features["macd_hist"],
                 bb_percent_b=features["bb_percent_b"],
             ))
+
+        # 같은 날짜의 다섯 지수가 모두 검증된 뒤에만 재사용 가능한 종가를 기록한다.
+        if len({q.as_of for q in quotes}) == 1:
+            self._save_us_closes(previous_sessions, quotes[0].as_of, quotes)
 
         # (V3.7) 거시 지표 — 개별 실패는 건너뛰고 기록만 남긴다
         macro: list[IndexQuote] = []
@@ -159,6 +221,8 @@ class MarketDataProvider:
                 close = hist["Close"].squeeze().dropna()
                 if len(close) < 2:
                     raise DataAccessError("데이터 부족")
+                if self._weekday_steps(close.index[-2].date(), close.index[-1].date()) > 1:
+                    raise DataAccessError("중간 거래일 누락 · 등락률 보류")
                 chg = float((close.iloc[-1] / close.iloc[-2] - 1) * 100)
                 macro.append(IndexQuote(name=name, change_pct=round(chg, 2),
                                         direction="up" if chg >= 0 else "down",
@@ -202,10 +266,15 @@ class MarketDataProvider:
         from datetime import timedelta
         from data.sessions import first_session_after
 
-        hist = yf.download(KR_INDEX_TICKER, start=after_date - timedelta(days=15),
-                           end=after_date + timedelta(days=20), progress=False)
-        if hist.empty:
-            raise DataAccessError(f"KOSPI {after_date} 전후 데이터를 가져오지 못했습니다")
+        try:
+            hist = yf.download(KR_INDEX_TICKER, start=after_date - timedelta(days=15),
+                               end=after_date + timedelta(days=20), progress=False)
+        except Exception:  # noqa: BLE001 — Yahoo 장애 시 검증 가능한 국내 종가로만 보완
+            hist = None
+        if hist is None or hist.empty:
+            if self.backtest_mode:
+                raise DataAccessError(f"KOSPI {after_date} 전후 데이터를 가져오지 못했습니다")
+            return self._naver_kospi_session_after(after_date)
         close = hist["Close"].squeeze()
         sdates = [str(d.date()) for d in close.index]
         closes = [float(v) for v in close.tolist()]
@@ -218,6 +287,32 @@ class MarketDataProvider:
         change = float((closes[i] / closes[i - 1] - 1) * 100)
         return {"actual_date": str(dates[i]), "change_pct": round(change, 4),
                 "actual_direction": "up" if change >= 0 else "down"}
+
+    def _naver_kospi_session_after(self, after_date: date) -> dict:
+        """Yahoo 전체 장애 시 최근 국내 확정 종가만으로 채점한다. 백테스트에는 사용하지 않는다."""
+        if self.backtest_mode:
+            raise DataAccessError("백테스트에서는 현재 시세로 과거 거래일을 보완하지 않습니다")
+        from data.kr_daily import fetch_daily
+        from data.sessions import first_session_after, kst_now
+
+        now = kst_now()
+        rows = fetch_daily("KOSPI", "index", pages=4)
+        rows = [r for r in rows if r.get("date", "") <= str(now.date())]
+        if now.hour < 15 or (now.hour == 15 and now.minute < 40):
+            rows = [r for r in rows if r["date"] < str(now.date())]
+        dates = [date.fromisoformat(r["date"]) for r in rows]
+        i = first_session_after(dates, after_date)
+        if i is None:
+            raise DataAccessError(f"{after_date} 이후 확정 KOSPI 종가가 없습니다")
+        row, previous = rows[i], rows[i - 1]
+        close, prev = row.get("close"), row.get("prev_close")
+        prior_close = previous.get("close")
+        if (any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+                for v in (close, prev, prior_close)) or abs(prev - prior_close) > 0.05):
+            raise DataAccessError("KOSPI 전일 종가 대조에 실패했습니다")
+        change = (close / prev - 1) * 100
+        return {"actual_date": row["date"], "change_pct": round(change, 4),
+                "actual_direction": "up" if change >= 0 else "down", "source": "네이버 증권"}
 
     def fetch_kospi_history(self, as_of: date, sessions: int = 260) -> dict:
         """(V3.14) as_of 까지의 KOSPI 종가/고가/저가 시계열 (오래된→최신). 정량 지표 계산용.

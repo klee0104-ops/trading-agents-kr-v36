@@ -177,3 +177,33 @@ def test_prompt_thresholds_are_not_treated_as_fabricated_numbers():
     c = check_points(["SOX 등락 +1.10% 로 1.5% 기준 미만 [M2]"], reg)[0]
     assert c["status"] == "ok"
     assert check_points(["SOX 등락 +1.70% [M2]"], reg)[0]["status"] == "number_mismatch"
+
+
+def test_paper_only_soft_qa_keeps_instrument_and_trader_citation_gates():
+    """Reviewer veto can reduce paper size, never waive factual source checks."""
+    from datetime import datetime
+    from data.sessions import KST
+    from execution.short_intraday_ai import validate
+    from tools.short_intraday_review import source_registry
+
+    now = datetime(2026, 10, 7, 10, 30, tzinfo=KST)
+    quotes = {code: {'date': str(now.date()), 'value': 100, 'market_status': 'OPEN',
+                     'observed_at': now.isoformat(), 'traded_at': now.isoformat()}
+              for code in ('KPI200', '069500', '114800')}
+    sources = source_registry(quotes, now, .4, [])
+    forecasts = [{'code': code, 'up_probability': probability,
+                  'reasoning': [f'시세 [M{index}]']}
+                 for index, (code, probability) in enumerate(
+                     (('KPI200', 53), ('069500', 53), ('114800', 47)), 901)]
+    proposal = {'forecasts': forecasts, 'paper_action': '069500',
+                'paper_rationale': ['지수와 ETF 근거 [M901] [M902]']}
+    veto = {'approve': False, 'reasoning': ['확신 부족 [M901]']}
+    assert validate(proposal, veto, sources, now, 'scheduled_open')['status'] == 'experimental'
+    no_source = {**proposal, 'paper_rationale': ['근거 없음']}
+    assert validate(no_source, veto, sources, now, 'scheduled_open')['status'] == 'held'
+    unknown = {**proposal, 'paper_rationale': ['없는 출처 [M999] [M902]']}
+    assert validate(unknown, veto, sources, now, 'scheduled_open')['status'] == 'held'
+    no_instrument = [source for source in sources if source['id'] != 'M902']
+    assert validate(proposal, veto, no_instrument, now, 'scheduled_open')['status'] == 'held'
+    opposed = {**proposal, 'forecasts': [*forecasts[:2], {**forecasts[2], 'up_probability': 53}]}
+    assert validate(opposed, veto, sources, now, 'scheduled_open')['status'] == 'held'

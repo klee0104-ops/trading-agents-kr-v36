@@ -79,6 +79,27 @@ risk_level_hint={market_analysis.risk_level_hint}, flags={market_analysis.risk_f
 
 위 상충을 검토해 최종 리스크 수준과 신뢰 여부를 판단하세요."""
 
-    result = llm.complete_json(VERIFICATION_SYSTEM_PROMPT, user_prompt, max_tokens=400)
+    raw = llm.complete_json(VERIFICATION_SYSTEM_PROMPT, user_prompt, max_tokens=400)
+    result = normalize_verification(raw, risk_assessment.get("risk_level", "보통"))
     result["code_checks"] = checks
     return result
+
+
+def normalize_verification(raw, fallback_level: str) -> dict:
+    """(V3.31) 검증 LLM 응답 정리. verification_passed 가 bool True 가 아니면 통과로 보지 않고,
+    리스크 수준이 허용 목록 밖이면 원래 값을 유지한다 (형식 오류가 '통과'·'규칙 무력화'로 이어지던 문제)."""
+    r = dict(raw) if isinstance(raw, dict) else {}
+    issues = []
+    if r.get("verification_passed") is not True and r.get("verification_passed") is not False:
+        issues.append(f"verification_passed={r.get('verification_passed')!r}→false")
+    r["verification_passed"] = r.get("verification_passed") is True
+    lvl = r.get("final_risk_level")
+    if lvl not in RISK_ORDER:
+        issues.append(f"final_risk_level={lvl!r}→{fallback_level}")
+        r["final_risk_level"] = fallback_level
+    if not isinstance(r.get("notes"), str):
+        r["notes"] = str(r.get("notes") or "")
+    if issues:
+        print("[검증 응답 형식 보정] " + ", ".join(issues))
+        r["format_fixed"] = issues
+    return r

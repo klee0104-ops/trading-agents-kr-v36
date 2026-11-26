@@ -35,6 +35,57 @@ def test_shared_html_includes_simulated_returns_but_not_unknown_account_fields()
     assert 'fetch(' not in page
 
 
+def test_shared_performance_audit_is_allowlisted_and_does_not_mix_actual_account():
+    import json
+    import re
+    from web.export_site import render_fragment
+
+    audit = {'direction': {'total': 5, 'correct': 4, 'accuracy_pct': 80.0,
+                           'wilson_95_pct': [37.6, 96.4], 'secret': 'DO_NOT_SHARE'},
+             'calibration': {'total': 6, 'brier': 0.24},
+             'matched_etf': {'days': 2, 'ai_net_return_pct': 0.3,
+                             'always_long_net_return_pct': 0.1, 'secret': 'DO_NOT_SHARE'},
+             'secret': 'DO_NOT_SHARE'}
+    page = render_fragment({'performance_evaluation': audit})
+    public = json.loads(re.search(r'id="ta-data">(.*?)</script>', page, re.S).group(1))
+    assert public['performance_evaluation']['direction']['total'] == 5
+    assert public['performance_evaluation']['matched_etf']['days'] == 2
+    assert 'DO_NOT_SHARE' not in page
+    assert '실제 계좌 손익 아님' in page
+
+
+def test_shared_partial_account_shows_only_dated_historical_valuation():
+    import json
+    import re
+    import subprocess
+    import shutil
+    from web.export_site import render_fragment, _JS
+
+    paper = {'portfolio_mode': True, 'initial_cash': 30_000_000, 'equity': None, 'total_return_pct': None,
+             'valuation_audit': {'status': 'partial', 'note': '보유 시세 확인 대기'},
+             'last_complete_valuation': {'date': '2026-10-08', 'equity': 29_947_922.36,
+                 'contributed_capital': 30_000_000, 'total_return_pct': -.1736},
+             'private_note': 'DO_NOT_SHARE'}
+    page = render_fragment({'paper': paper})
+    public = json.loads(re.search(r'id="ta-data">(.*?)</script>', page, re.S).group(1))['paper']
+    assert public.get('equity') is None and public.get('total_return_pct') is None
+    assert public['last_complete_valuation']['date'] == '2026-10-08'
+    assert 'DO_NOT_SHARE' not in page
+    node = shutil.which('node')
+    assert node
+    source = '''const vm=require('node:vm'), assert=require('node:assert/strict');
+const nodes={}; const document={getElementById(id){return nodes[id]||(nodes[id]={textContent:id==='ta-data'?JSON.stringify(DATA):'',innerHTML:''});}};
+vm.runInNewContext(SOURCE,{document});
+const html=nodes.paper.innerHTML;
+assert.ok(html.includes('마지막 전체 시세 평가 · 현재값 아님'));
+assert.ok(html.includes('2026-10-08 기준'));
+assert.ok(html.includes('현재 시세가 모두 확인될 때까지'));
+assert.ok(!html.includes('평가금액 29,947,922원'));
+'''.replace('DATA', json.dumps({'generated_at': '2026-10-11T13:00', 'paper': public}, ensure_ascii=False)).replace('SOURCE', json.dumps(_JS))
+    result = subprocess.run([node, '-'], input=source, text=True, encoding='utf-8', capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_paper_public_uses_only_simulated_summary(monkeypatch):
     from execution.paper import PaperAccount
     from web.export_site import _paper_public
@@ -80,3 +131,28 @@ def test_export_masks_loaded_arbitrary_secret(monkeypatch, tmp_path):
     monkeypatch.setattr(ex, 'build_snapshot_data', lambda: {'prediction': {'reasoning': [marker]}})
     ex.export_site(tmp_path)
     assert marker not in (tmp_path / 'index.html').read_text(encoding='utf-8')
+
+
+def test_public_analyst_summary_uses_only_checked_points():
+    from web.export_site import _public_analysts
+    reports = {"TechnicalAnalyst": {
+        "direction": "down", "confidence": "보통",
+        "summary": "미국 지수 전체가 하락했다 [M4]",  # not checked
+        "notable_points": ["SOX -1.15% [M4] — 출처: Yahoo Finance"],
+        "citation_ok": True, "citation_check": {"valid": 1, "total": 2},
+    }}
+    public = _public_analysts(reports)["TechnicalAnalyst"]
+    assert "미국 지수 전체" not in public["summary"]
+    assert "SOX -1.15% [M4]" in public["summary"]
+    assert public["citation_check"] == {"valid": 1, "total": 2}
+
+
+def test_public_analyst_without_verified_points_is_not_directional():
+    from web.export_site import _public_analysts
+    reports = {"NewsSentimentAnalyst": {
+        "direction": "up", "summary": "확인 안 된 호재", "notable_points": [],
+        "citation_ok": False, "citation_check": {"valid": 0, "total": 2},
+    }}
+    public = _public_analysts(reports)["NewsSentimentAnalyst"]
+    assert public["direction"] is None
+    assert "확인 안 된 호재" not in public["summary"]

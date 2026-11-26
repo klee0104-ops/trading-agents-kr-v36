@@ -20,9 +20,9 @@ def test_dashboard_contract():
     page.feed((ROOT / 'web/static/index.html').read_text(encoding='utf-8'))
     assert '/app.js' in page.scripts
     assert len(page.ids) == len(set(page.ids))
-    assert len(page.tabs) == 10
+    assert len(page.tabs) == 12
     assert "company" in page.tabs
-    assert "long" in page.tabs and "reports" in page.tabs
+    assert "long" in page.tabs and "medium" in page.tabs and "reports" in page.tabs and "us" in page.tabs
     assert all('tab-' + tab in page.ids for tab in page.tabs)
     js = (ROOT / 'web/static/app.js').read_text(encoding='utf-8')
     required = set(re.findall(r'\$\("#([\w-]+)"\)', js)) - {'ticker'}
@@ -65,7 +65,8 @@ def test_paper_errors_redacted(client, monkeypatch):
 def test_package_excludes_private_outputs(tmp_path):
     from security.scan import build_release_zip
     root = tmp_path / 'project'; root.mkdir()
-    private = ['paper_account.json', 'lessons.json', 'backtest_results_v2.json', 'backtest_log.txt', 'report.pdf', 'flow_debug.html']
+    private = ['paper_account.json', 'lessons.json', 'backtest_results_v2.json', 'backtest_log.txt', 'report.pdf', 'flow_debug.html',
+               'us_paper.json', 'us_plan.json']
     for name in private: (root / name).write_text('private', encoding='utf-8')
     (root / 'cli.py').write_text('# public source', encoding='utf-8')
     result = build_release_zip(tmp_path / 'release.zip', root)

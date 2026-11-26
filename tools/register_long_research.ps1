@@ -3,8 +3,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $projectRoot 'venv\Scripts\pythonw.exe'
 if (-not (Test-Path -LiteralPath $python)) { throw 'Project Python is missing.' }
 $taskName = 'TradingAgents-KR LongResearch'
-$action = New-ScheduledTaskAction -Execute $python -Argument '-B -m tools.long_research --cycle' -WorkingDirectory $projectRoot
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 60)
+$action = New-ScheduledTaskAction -Execute $python -Argument '-B -m tools.weekday_task --job long_research' -WorkingDirectory $projectRoot
+. (Join-Path $PSScriptRoot 'weekday_schedule.ps1')
+$trigger = New-WeekdayRepeatingTrigger -Minutes 60
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)

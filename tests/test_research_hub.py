@@ -33,9 +33,17 @@ def test_sector_specific_missing_and_preference():
 
 def test_watchlist_diversity_stability_rotation():
  rows=screens();a=choose_watchlist(rows,[],[],[],NOW)
- assert len(a)==15 and max(sum(s['sector']==sec for s in rows if s['code'] in a) for sec in {s['sector'] for s in rows})<=3
+ assert len(a)==30 and max(sum(s['sector']==sec for s in rows if s['code'] in a) for sec in {s['sector'] for s in rows})<=5
  assert choose_watchlist(rows,a,[],['가상기업99'],NOW)==a
  first=choose_batch(a,[],{});assert not set(first)&set(choose_batch(a,[],dict.fromkeys(first,NOW.isoformat())))
+
+
+def test_saved_daily_screen_expands_watchlist_without_refetching():
+ rows=screens();old={'attempt_day':str(NOW.date()),'status':'ok','screens':rows,'watchlist':choose_watchlist(rows,[],[],[],NOW,limit=15)}
+ def forbidden(*args,**kwargs):raise AssertionError('Saved screen must be reused')
+ updated=update_catalog(old,NOW,fetcher=forbidden,screener=forbidden)
+ assert len(updated['watchlist'])==30 and len(updated['changes'])==1
+ assert update_catalog(updated,NOW,fetcher=forbidden,screener=forbidden)['changes']==updated['changes']
 
 def test_catalog_failure_preserves_holdings_but_blocks_new_buys():
  old={'instruments':{'123456':{'name':'과거보유'}},'watchlist':['123456']}
@@ -78,7 +86,11 @@ def test_dynamic_paper_known_code_and_unreviewed_holding_protected():
  after=tick(d,None,quotes,later,plan)
  assert len(after['trades'])==1 and after['sleeves']['long']['holdings']
  unknown=deepcopy(plan);unknown['allocations']=[{'code':'999999','weight':.2,'buy_below':100}]
- assert tick(fresh(NOW),None,quotes,NOW,unknown)==fresh(NOW)
+ blocked=tick(fresh(NOW),None,quotes,NOW,unknown)
+ assert blocked['trades']==[] and not blocked['sleeves']['long']['holdings']
+ assert blocked['quote_health']['status']=='ok'  # Only an unheld buy candidate is missing.
+ assert '999999' in blocked['quote_health']['missing_codes']
+ assert summary(blocked)['total_return_pct'] is not None
 
 def test_reports_public_csp_and_no_execution():
  from web.export_site import render_fragment
@@ -94,7 +106,9 @@ def test_expansion_does_not_reset_weekly_budget(tmp_path,monkeypatch):
  import data.long_universe as universe
  from tools.long_research import cycle
  from tools.paper_portfolio import write
- p=tmp_path/'long.json';write(p,{'last_model_review_at':NOW.isoformat(),'report':{'generated_at':NOW.isoformat(),'status':'held','roles':[]}})
+ p=tmp_path/'long.json';write(p,{'last_model_review_at':NOW.isoformat(),'fundamentals_checked_day':str(NOW.date()),
+                               'fundamentals':[{'code':'123456','status':'ok'}],
+                               'report':{'generated_at':NOW.isoformat(),'status':'held','roles':[]}})
  cat={'status':'ok','watchlist':['123456'],'instruments':{'123456':{'name':'합성기업','symbol':'123456.KS','aliases':['Synthetic'],'related':[]}},'checked_at':NOW.isoformat()}
  monkeypatch.setattr(universe,'update_catalog',lambda *a,**kw:cat)
  monkeypatch.setattr(data,'collect_news',lambda *a:{'status':'ok','events':[],'checked_at':NOW.isoformat()})
@@ -102,6 +116,53 @@ def test_expansion_does_not_reset_weekly_budget(tmp_path,monkeypatch):
  monkeypatch.setattr(data,'collect_fundamentals',forbidden)
  s=cycle(p,tmp_path/'book.json',NOW+timedelta(hours=1),forbidden,expanded=True)
  assert s['last_model_review_at']==NOW.isoformat() and s['catalog']['next_batch']==['123456']
+
+
+def test_expanded_batch_reserves_slots_for_long_holdings(tmp_path,monkeypatch):
+ import data.long_research as data
+ import data.long_universe as universe
+ from tools.long_research import cycle
+ from tools.paper_portfolio import write
+ held=['000001','000002'];candidates=[f'{i:06}' for i in range(3,10)]
+ p=tmp_path/'long.json';write(p,{'last_model_review_at':NOW.isoformat(),'fundamentals_checked_day':str(NOW.date()),
+                               'fundamentals':[{'code':c,'status':'ok'} for c in held+candidates[:3]],
+                               'report':{'status':'held','roles':[]}})
+ write(tmp_path/'book.json',{'sleeves':{'long':{'holdings':dict.fromkeys(held,{})}}})
+ instruments={c:{'name':'합성기업'+c,'symbol':c+'.KS','aliases':['Synthetic'],'related':[]} for c in held+candidates}
+ catalog={'status':'ok','watchlist':candidates,'instruments':instruments,'review_history':{}}
+ monkeypatch.setattr(universe,'update_catalog',lambda *a,**kw:catalog)
+ monkeypatch.setattr(data,'collect_news',lambda *a:{'status':'ok','events':[],'checked_at':NOW.isoformat()})
+ def forbidden(*a):raise AssertionError('No data or model call while review is not due')
+ monkeypatch.setattr(data,'collect_fundamentals',forbidden)
+ state=cycle(p,tmp_path/'book.json',NOW+timedelta(hours=1),forbidden,expanded=True)
+ assert state['catalog']['next_batch']==held+candidates[:3]
+
+
+def test_new_batch_collects_once_without_repeating_daily_model_review(tmp_path,monkeypatch):
+ import data.long_research as data
+ import data.long_universe as universe
+ from tools.long_research import cycle
+ from tools.paper_portfolio import write
+ p=tmp_path/'long.json';book=tmp_path/'book.json'
+ write(p,{'last_model_review_at':NOW.isoformat(),'last_candidate_attempt_day':str(NOW.date()),
+          'fundamentals_checked_day':str(NOW.date()),'dart_financial_checked_day':str(NOW.date()),
+          'fundamentals':[{'code':'000001'}],
+          'report':{'generated_at':NOW.isoformat(),'status':'approved','roles':[]}})
+ codes=[f'{i:06}' for i in range(2,7)]
+ instruments={c:{'name':'합성기업'+c,'symbol':c+'.KS','aliases':['Synthetic'],'related':[]} for c in codes}
+ catalog={'status':'ok','watchlist':codes,'instruments':instruments,'review_history':{}}
+ monkeypatch.setattr(universe,'update_catalog',lambda *a,**kw:catalog)
+ monkeypatch.setattr(data,'collect_news',lambda *a:{'status':'ok','events':[],'checked_at':NOW.isoformat()})
+ collected=[]
+ def collect(now,selected):
+  collected.append(list(selected))
+  return [{'code':c,'name':instruments[c]['name'],'status':'insufficient','eligible':False,'metrics':{}} for c in selected]
+ monkeypatch.setattr(data,'collect_fundamentals',collect)
+ def no_model():raise AssertionError('Daily model-call budget must remain closed')
+ first=cycle(p,book,NOW+timedelta(hours=1),no_model,expanded=True)
+ second=cycle(p,book,NOW+timedelta(hours=2),no_model,expanded=True)
+ assert collected==[codes]
+ assert first['report']['status']=='approved' and second['last_model_review_at']==NOW.isoformat()
 
 
 def test_paged_pool_includes_alphanumeric_codes(monkeypatch):

@@ -26,7 +26,15 @@ def short_report(envelope):
                       'direction':clean(r.get('direction')),'points':[clean(p,titles) for p in r.get('notable_points',[])[:6]],
                       'citation_ok':r.get('citation_ok')})
     plan=fr.get('etf_execution') or {}
-    execution={**pick(plan,('status','note','target_date','entry_window','exit_time','selected_code','weight','futures_note')),'forecasts':[{**pick(f,('code','name','up_probability','horizon')),'reasoning':[clean(v,titles) for v in f.get('reasoning',[])[:3]]} for f in plan.get('forecasts',[])[:3]]}
+    execution={**pick(plan,('schema','status','note','target_date','entry_window','exit_time','selected_code','weight','selection_basis','futures_note')),
+               'qa':pick(plan.get('etf_qa') or {},('passed','scope','reason_code','reason','instrument','evidence_status','evidence_reason_code','source_count')),
+               'forecasts':[{**pick(f,('code','name','up_probability','horizon')),'reasoning':[clean(v,titles) for v in f.get('reasoning',[])[:3]]} for f in plan.get('forecasts',[])[:3]]}
+    probe=plan.get('neutral_probe')
+    if isinstance(probe,dict):
+        execution['neutral_probe']={**pick(probe,('code','basis_date','threshold_pct')),
+                                    'source_ids':[v for v in probe.get('source_ids',[]) if v in ('M901','M902','M903')][:3],
+                                    'five_session_return_pct':{k:v for k,v in (probe.get('five_session_return_pct') or {}).items()
+                                                               if k in ('KPI200','069500','114800') and type(v) in (int,float)}}
     return {'execution':execution,'team':'short','at':stamp,'target_date':clean(o.get('target_date')),'title':'단기투자팀 · 시장 판단 보고서',
             'prediction':{**pick(pred,('direction','up_probability','confidence','position','outlook_label')),
                           'reasoning':[clean(p,titles) for p in pred.get('reasoning',[])[:6]]},

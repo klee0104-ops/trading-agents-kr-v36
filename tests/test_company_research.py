@@ -8,7 +8,7 @@ def test_budget_reserved_failure_isolated_and_no_paid_call_without_data(tmp_path
     from data import long_research as data
     path=tmp_path/'company_research.json';long=tmp_path/'long.json'
     long.write_text('{}');before=long.read_bytes()
-    monkeypatch.setattr(data,'collect_fundamentals',lambda *a:[])
+    monkeypatch.setattr(data,'collect_fundamentals',lambda *a,**kw:[])
     monkeypatch.setattr(data,'collect_news',lambda *a:{'status':'unavailable','events':[]})
     def forbidden():raise AssertionError('must not create model without data')
     now=datetime(2026,9,29,10,tzinfo=KST)
@@ -48,12 +48,26 @@ def test_public_search_has_no_execution_route_and_private_files_excluded():
     assert _BODY.index('data-tab="company"')<_BODY.index('data-tab="records"')
     assert _excluded(Path('company_research.json'))
 
+
+def test_public_company_list_uses_current_prediction_codes_without_running_analysis(tmp_path):
+    company=tmp_path/'company.json';long=tmp_path/'long.json';outcome=tmp_path/'outcome.json'
+    company.write_text(json.dumps({'reports':[]}),encoding='utf-8')
+    long.write_text('{}',encoding='utf-8')
+    outcome.write_text(json.dumps({'mode':'real','outcome':{'target_date':'2026-10-02',
+        'news_universe':[{'code':'000660','name':'SK하이닉스'},
+                         {'code':'005930','name':'삼성전자'},
+                         {'code':'999999','name':'목록 외 종목'}]}}),encoding='utf-8')
+    listing=cr.read_public(company,long,outcome)
+    assert listing['featured_codes']==['000660','005930']
+    assert listing['featured_date']=='2026-10-02'
+    assert listing['reports']==[]
+
 def test_success_uses_three_calls_and_publishes_no_allocations_or_drafts(tmp_path,monkeypatch):
     from data import long_research as data
     now=datetime(2026,9,29,10,tzinfo=KST)
     periods=[{'date':d,'revenue':100,'income':10,'fcf':8,'eps':1} for d in ['2026-06-30','2026-03-31','2025-12-31','2025-09-30','2025-06-30']]
     f=data.normalize_fundamentals('005930',periods,{'date':'2026-06-30','debt':30,'equity':100,'shares':5},40,now)
-    monkeypatch.setattr(data,'collect_fundamentals',lambda *a:[f])
+    monkeypatch.setattr(data,'collect_fundamentals',lambda *a,**kw:[f])
     monkeypatch.setattr(data,'collect_news',lambda *a:{'status':'ok','checked_at':now.isoformat(),'events':[]})
     class Model:
         calls=0

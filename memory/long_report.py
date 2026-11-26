@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
-from data.long_research import UNIVERSE
+from data.long_research import UNIVERSE, finite
 
 def load(path):
     p=Path(path)
@@ -38,6 +38,17 @@ def decision(state,now):
             current=catalog.get('status')=='ok' and timedelta(0)<=now-datetime.fromisoformat(catalog['checked_at'])<=timedelta(days=3)
         except (KeyError,TypeError,ValueError):current=False
         if not current:valid=False;reasons.append('후보군 정보 갱신 필요')
+    if state.get('dart_financial_required'):
+        checked={f.get('code'):f for f in report.get('fundamentals',[])}
+        for allocation in report.get('allocations',[]):
+            if allocation.get('weight',0)<=0:continue
+            code=allocation.get('code')
+            f=checked.get(code) or {}
+            verification=f.get('dart_verification') or {}
+            if verification.get('status') not in ('verified','verified_derived_eps') or verification.get('period_end')!=f.get('period_end'):
+                blocked.add(code)
+                block_by_code.setdefault(code,[]).append('OpenDART 재무·EPS 대조 미완료')
+        if blocked and not reasons:reasons.append('OpenDART 재무·EPS 대조 미완료')
     return {'reviewed_codes':[f['code'] for f in report.get('fundamentals',[])],'instruments':{c:{'name':u['name'],'sector':u.get('sector','Unknown')} for c,u in universe.items()},'status':'approved' if valid else 'held','generated_at':report.get('generated_at'),
             'valid_until':report.get('valid_until'),'allocations':report.get('allocations',[]) if valid else [],
             'blocked_codes':sorted(blocked),'block_reasons':reasons,
@@ -62,7 +73,10 @@ def candidate_gate(f,report,gate):
              for (label,value,required),predicate in zip(checks,predicates)]
     missing=list(f.get('missing') or [])
     sector_gap=f.get('sector') in ('Financial Services','Unknown') and missing==['업종별 추가 자료 검증 필요 · 자동 매수 제외']
-    if f.get('status') not in ('ok','insufficient') or (missing and not sector_gap) or any(c['result']=='unknown' for c in details):
+    verified=(f.get('dart_verification') or {}).get('status')
+    if verified and verified not in ('verified','verified_derived_eps'):
+        phase='data_wait';reason='OpenDART 재무·EPS 대조 실패 또는 불완전'
+    elif f.get('status') not in ('ok','insufficient') or (missing and not sector_gap) or any(c['result']=='unknown' for c in details):
         phase='data_wait';reason='필수 재무자료 확인 대기'
     elif f.get('sector') in ('Financial Services','Unknown'):
         phase='sector_review';reason='업종별 추가 검증 대기'
@@ -88,7 +102,9 @@ def candidate_gate(f,report,gate):
 
 def public_summary(state,now):
     from rules.citations import sanitize_external
+    import re
     report=state.get('report') or {};news=state.get('news') or {}
+    dart=state.get('dart') or {}
     universe={**UNIVERSE,**(state.get('catalog') or {}).get('instruments',{})};gate=decision(state,now)
     # Never include raw news titles, private prompts or full provider responses.
     titles=[n.get('title','') for n in news.get('events',[])]+[n.get('title','') for n in state.get('alerts',[])]
@@ -97,16 +113,48 @@ def public_summary(state,now):
         for title in titles:
             if len(title)>10: s=s.replace(title,'[기사 제목 생략]')
         return s
-    candidates=[]
-    for f in report.get('fundamentals',state.get('fundamentals',[])):
+    dart_financial_checks=[]
+    for f in state.get('fundamentals',[])[:5]:
         code=f.get('code')
         if code not in universe:continue
+        validation=f.get('dart_verification') or {}
+        status=validation.get('status')
+        dart_financial_checks.append({'code':code,'name':universe[code]['name'],
+                                      'status':status if status in ('verified','verified_derived_eps','partial_eps','partial_debt','partial_debt_eps','mismatch','unavailable') else 'waiting',
+                                      'period_end':validation.get('period_end') or f.get('period_end'),
+                                      'checked_at':validation.get('checked_at'),
+                                      'reason':clean(validation.get('reason')) if validation.get('reason') else None})
+    candidates=[]
+    for f in (report.get('fundamentals') or state.get('fundamentals',[])):
+        code=f.get('code')
+        if code not in universe:continue
+        validation=f.get('dart_verification') or {}
+        safe_validation={'status':validation.get('status','waiting') if validation.get('status') in ('verified','verified_derived_eps','partial_eps','partial_debt','partial_debt_eps','mismatch','unavailable') else 'waiting',
+                         'period_end':validation.get('period_end'),'eps_basis':validation.get('eps_basis'),
+                         'reason':clean(validation.get('reason')) if validation.get('reason') else None,
+                         'checks':[{'metric':c.get('metric'),
+                                    'yahoo':c.get('yahoo') if finite(c.get('yahoo')) else None,
+                                    'dart':c.get('dart') if finite(c.get('dart')) else None,
+                                    'difference_pct':c.get('difference_pct') if finite(c.get('difference_pct')) else None,
+                                    'match':c.get('match') is True}
+                                   for c in validation.get('checks',[])[:8] if isinstance(c,dict) and c.get('metric') in ('ttm_income','ttm_fcf','equity','debt','latest_quarter_revenue','prior_year_quarter_revenue','ttm_eps')],
+                         'receipts':[{'id':str(r),'url':'https://dart.fss.or.kr/dsaf001/main.do?rcpNo='+str(r)}
+                                     for r in validation.get('receipts',[])[:3] if re.fullmatch(r'[0-9]{14}',str(r))]}
         candidates.append({'code':code,'name':universe[code]['name'],'status':f.get('status'),
                            'eligible':f.get('eligible',False),'period_end':f.get('period_end'),
                            'collected_at':f.get('collected_at'),'metrics':f.get('metrics',{}),
                            'missing':f.get('missing',[]),'eps_gap_details':f.get('eps_gap_details',[]),
+                           'dart_verification':safe_validation,
                            'source':f.get('source','자료 미확보'),
                            'gate':candidate_gate(f,report,gate)})
+    gate_labels={'data_wait':'자료·EPS·공시 확인 대기','sector_review':'업종별 검증 대기',
+                 'fundamental_fail':'수익성·부채 기준 미충족','valuation_wait':'PER·PBR 가격 기준 대기',
+                 'report_wait':'장기팀 보고서 미승인·만료','thesis_wait':'종목별 매수 배분 없음',
+                 'news_wait':'뉴스 위험 검토 대기','price_wait':'매수 기준가 대기',
+                 'eligible':'매수 조건 충족'}
+    gate_counts=[{'code':key,'label':label,
+                  'count':sum(c['gate']['phase']==key for c in candidates)}
+                 for key,label in gate_labels.items()]
     roles=[]
     for r in report.get('roles',[]):
         rows=[{'name':universe.get(s['code'],{'name':s['code']})['name'],'stance':s['stance'],
@@ -117,6 +165,15 @@ def public_summary(state,now):
     for n in news.get('events',[])[:30]:
         events.append({'evidence_id':('N'+str(report.get('reviewed_news_ids',[]).index(n['id'])+1)) if n['id'] in reviewed else None,'source':n['source'],'published_at':n['published_at'],'url':n['url'],
                        'risk_flag':n['risk_flag'],'reviewed':n['id'] in reviewed,'relations':n['relations']})
+    dart_events=[]
+    for event in dart.get('events',[])[:12]:
+        if not isinstance(event,dict):continue
+        receipt=str(event.get('id',''));code=str(event.get('code',''))
+        if not re.fullmatch(r'[0-9]{14}',receipt) or not re.fullmatch(r'[0-9]{6}',code):continue
+        dart_events.append({'code':code,'name':sanitize_external(str(event.get('name','')),80),
+                            'title':sanitize_external(str(event.get('title','')),160),
+                            'filed_date':str(event.get('filed_date','')) if re.fullmatch(r'[0-9]{8}',str(event.get('filed_date',''))) else '',
+                            'url':'https://dart.fss.or.kr/dsaf001/main.do?rcpNo='+receipt})
     catalog=state.get('catalog') or {}
     watch={'label':(catalog.get('universe') or {}).get('label','조사 후보군 대기'),'status':catalog.get('status','waiting'),
            'checked_at':catalog.get('checked_at'),'note':(catalog.get('universe') or {}).get('note',''),
@@ -132,12 +189,23 @@ def public_summary(state,now):
             'coverage':'조사 대상 전체 검토 누락'}
     review_issue=issues.get(report.get('failure_reason'),
                             '모델 응답 또는 보고서 검증 실패' if report.get('failure_reason') else None)
+    adjustments=[{k:a.get(k) for k in ('code','reason','requested_weight','approved_weight')}
+                 for a in report.get('allocation_adjustments',[])[:4]
+                 if isinstance(a,dict) and a.get('code') in universe and
+                 a.get('reason') in ('fundamental_or_critic_block','price_above_starter_limit','starter_valuation')]
     return {'deferred':[{'name':clean(f['name']),'missing':[clean(m) for m in f.get('missing',[])]} for f in report.get('deferred',[])],'watchlist':watch,'status':gate['status'],'generated_at':report.get('generated_at'),'valid_until':report.get('valid_until'),
-            'note':clean(note),'review_issue':review_issue,'candidates':candidates,'roles':roles,
-            'allocations':gate['allocations'],'blocked_codes':gate['blocked_codes'],'block_reasons':gate['block_reasons'],
+            'note':clean(note),'review_issue':review_issue,'candidates':candidates,'gate_counts':gate_counts,'roles':roles,
+            'allocations':gate['allocations'],'allocation_adjustments':adjustments,
+            'blocked_codes':gate['blocked_codes'],'block_reasons':gate['block_reasons'],
             'block_by_code':gate['block_by_code'],
             'news_status':news.get('status','waiting'),'news_checked_at':news.get('checked_at'),
-            'news_count':len(news.get('events',[])),'events':events,'calls':report.get('calls',0)}
+            'news_count':len(news.get('events',[])),'events':events,
+            'dart_financial_checks':dart_financial_checks,
+            'dart_status':dart.get('status','waiting'),'dart_checked_at':dart.get('checked_at'),
+            'dart_last_success_at':dart.get('last_success_at'),
+            'dart_partial_reason':dart.get('partial_reason'),
+            'dart_tracked_count':dart.get('tracked_count',0),'dart_events':dart_events,
+            'calls':report.get('calls',0)}
 
 def read_public(path):
     from data.sessions import kst_now

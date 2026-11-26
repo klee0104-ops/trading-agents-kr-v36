@@ -12,8 +12,12 @@ from security.secret_store import SECRET_PATTERNS
 EXTRA_PATTERNS = [re.compile(r'gh[pousr]_[A-Za-z0-9]{20,}'),
                   re.compile(r'github_pat_[A-Za-z0-9_]{30,}'),
                   re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
-                  re.compile(r'Bearer\s+[A-Za-z0-9_.-]{20,}', re.I)]
-SENSITIVE = re.compile(r'api[_-]?key|secret|password|credential|authorization|access[_-]?token|refresh[_-]?token|session[_-]?token', re.I)
+                  re.compile(r'Bearer\s+[A-Za-z0-9_.-]{20,}', re.I),
+                  # (V3.33) 개인정보: 개인 메일 주소(언론사 기자 메일은 제외), PC 사용자 경로, 계좌·주민번호·휴대폰 형태
+                  re.compile(r'[A-Za-z0-9._%+-]+@(?:gmail|naver|daum|hanmail|kakao|icloud|outlook|hotmail|nate|yahoo)\.(?:com|net|co\.kr)', re.I),
+                  re.compile(r'[A-Za-z]:\\{1,2}Users\\{1,2}|/Users/[A-Za-z]|/home/[a-z][a-z0-9_-]*/', re.I),
+                  re.compile(r'\b\d{8}-\d{2}\b|\b\d{6}-[1-4]\d{6}\b|\b01[016789]-\d{3,4}-\d{4}\b')]
+SENSITIVE = re.compile(r'api[_-]?key|app[_-]?key|secret|password|credential|authorization|access[_-]?token|refresh[_-]?token|session[_-]?token|account[_-]?(?:no|num|number)|(?:^|_)(?:acnt|cano)(?:_|$)|계좌번호|kiwoom', re.I)
 
 class PublicationBlocked(ValueError):
     pass

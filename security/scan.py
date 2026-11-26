@@ -20,8 +20,9 @@ from security.secret_store import PROJECT_ROOT, SECRET_PATTERNS, mask
 EXCLUDE_DIRS = {"venv", ".venv", "__pycache__", ".pytest_cache", ".git", ".claude",
                 ".idea", ".vscode", "release", "node_modules", "site", ".review-backups"}
 EXCLUDE_FILES = ["company_research.json", "company_research.json.lock", "company_research.pending", ".env", ".env.*", "*.db", "*.sqlite", "memory_store.json", "memory_store_superseded.json", "demo_memory.json", "last_outcome.json",
-                 "실행로그.txt", "진단결과.txt", "paper_account.json", "paper_portfolio.json", "paper_portfolio.json.lock", "paper_portfolio.pending", "paper_aggressive.json", "paper_aggressive.json.lock", "paper_aggressive.pending", "research_reports.json", "research_reports.json.lock", "research_reports.pending", "long_research.json", "long_research.json.lock", "long_research.pending", "lessons.json",
+                 "실행로그.txt", "진단결과.txt", "paper_account.json", "paper_portfolio.json", "paper_portfolio.json.lock", "paper_portfolio.pending", "paper_aggressive.json", "paper_aggressive.json.lock", "paper_aggressive.pending", "paper_intraday.json", "paper_intraday.json.lock", "paper_intraday.pending", "research_reports.json", "research_reports.json.lock", "research_reports.pending", "long_research.json", "long_research.json.lock", "long_research.pending", "lessons.json",
                  "backtest_results*.json", "*_log.txt", "아침요약.txt", "*.bak", "*.pdf", "flow_debug.html",
+                 "us_paper.json", "us_paper.json.lock", "us_paper.pending", "us_plan.json", "us_plan.json.lock", "us_plan.pending",
                  "*.pyc", "*.log", "*.zip", "*.pem", "*.key"]
 ALLOW_FILES = [".env.example"]
 

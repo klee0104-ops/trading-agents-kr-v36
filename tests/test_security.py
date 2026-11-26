@@ -22,6 +22,7 @@ from security.secret_store import SecretStr, mask, redact, is_placeholder
 
 FAKE_GEMINI = "AQ.Ab8RN6" + "x" * 44
 FAKE_ANTHROPIC = "sk-ant-api03-" + "y" * 40
+FAKE_DART = "0123456789abcdef" * 2 + "01234567"
 
 
 # ---------------------------------------------------------------- SecretStr
@@ -101,6 +102,36 @@ def test_remove_key_from_dotenv_keeps_other_settings(isolated):
 def test_unknown_provider_rejected():
     with pytest.raises(ValueError):
         ss.get_api_key("openai")
+
+
+def test_dart_key_is_separate_and_url_is_redacted(isolated):
+    _, store = isolated
+    store["DART_API_KEY"] = FAKE_DART
+    key = ss.get_api_key("dart")
+    assert key.source == "keyring" and key.reveal() == FAKE_DART
+    assert not ss.get_api_key("gemini")
+    assert ss.key_status("dart").env_name == "DART_API_KEY"
+    assert FAKE_DART not in ss.redact("https://opendart.fss.or.kr/api/company.json?crtfc_key=" + FAKE_DART)
+
+
+def test_dart_key_requires_forty_alphanumeric_characters():
+    with pytest.raises(ValueError):
+        ss.store_in_keyring("dart", "short-key")
+    with pytest.raises(ValueError):
+        ss.store_in_keyring("dart", "!" * 40)
+
+
+def test_dart_cli_never_prints_key(monkeypatch, capsys):
+    import cli
+    monkeypatch.setattr("getpass.getpass", lambda _: FAKE_DART)
+    monkeypatch.setattr(ss, "keyring_available", lambda: True)
+    monkeypatch.setattr(ss, "store_in_keyring", lambda provider, value: None)
+    monkeypatch.setattr(ss, "key_status", lambda provider: ss.KeyStatus(provider, "DART_API_KEY", True, "keyring", "hidden", False))
+    cli.cmd_set_key(["dart"])
+    cli.cmd_key_status()
+    out = capsys.readouterr().out
+    assert "DART_API_KEY" in out
+    assert FAKE_DART not in out and FAKE_DART[:4] not in out and FAKE_DART[-4:] not in out
 
 
 # ---------------------------------------------------------------- redaction

@@ -22,14 +22,20 @@ from rules.engine import MarketAnalysis, build_context_text
 from rules.citations import CITATION_RULES, registry_text, enforce_report
 
 _SCHEMA = (CITATION_RULES + "\n"
+           "(V3.37) '기준비율' 자료는 과거 같은 상황 다음 날의 빈도일 뿐 오늘의 답이 아닙니다. 표본 부족이면 근거로 쓰지 말고, "
+           "쓸 때도 오늘 자료와 함께 쓰세요. 'OpenDART 공시'는 개장 전 대형주 공시 제목으로, 해당 종목에 주는 영향을 판단하세요.\n"
            '반드시 JSON만 출력하세요: {"direction": "up 또는 down", "confidence": "낮음/보통/높음", '
            '"summary": "... [ID]", "notable_points": ["사실·수치 ... [M1]", "... [Q2][R1]"]}\n'
            "notable_points 의 각 항목은 근거 ID가 붙은 한 문장입니다. ID가 없거나 수치가 자료와 다르면 코드가 폐기하고, "
-           "남은 근거가 없으면 당신의 의견은 다수결에서 제외됩니다.")
+           "남은 근거가 없으면 당신의 의견은 다수결에서 제외됩니다.\n"
+           "(V3.30) 자료 줄을 그대로 옮겨 적지 마세요. 각 문장은 '사실(수치) → 그것이 대상 거래일 KOSPI 방향에 주는 의미' "
+           "형태의 해석이어야 합니다. 예: \"SOX 등락 -1.61%로 기준(±1.5%)을 넘는 하락이라 반도체 비중이 큰 KOSPI에 부담 [M4]\". "
+           "판단에 영향이 큰 근거 2~4개만 고르세요.")
 
 TECHNICAL_PROMPT = f"""당신은 기술적 분석가(Technical Analyst) 에이전트입니다.
-미국 주요 지수의 등락률과 이미 코드로 계산된 RSI14/MACD 히스토그램/볼린저 %B만 근거로,
-다음 거래일 KOSPI 방향에 대한 기술적 관점의 판단을 내리세요. 환율·뉴스 등 다른 정보는 다루지 마세요.
+KOSPI 자체의 정량 지표([Q] 자료: RSI·MACD·볼린저·이동평균·변동성·모멘텀)와 미국 주요 지수의 등락·기술 지표([M] 자료)만 근거로,
+대상 거래일 KOSPI 방향에 대한 기술적 관점의 판단을 내리세요. KOSPI 자신의 추세·과열 상태를 먼저 보고, 미국 지수는 보조로 쓰세요.
+환율·뉴스 등 다른 정보는 다루지 마세요.
 과매수/과매도, 모멘텀, 추세 관점에서 사실과 해석만 간결하게. {_SCHEMA}"""
 
 MACRO_PROMPT = f"""당신은 거시·수급 분석가(Macro & Flow Analyst) 에이전트입니다.
@@ -40,7 +46,9 @@ MACRO_PROMPT = f"""당신은 거시·수급 분석가(Macro & Flow Analyst) 에�
 SEMI_PROMPT = f"""당신은 반도체 분석가(Semiconductor Analyst) 에이전트입니다.
 KOSPI는 삼성전자·SK하이닉스 비중이 커서 필라델피아 반도체 지수(SOX)와 방향 일치율이 가장 높습니다.
 SOX의 등락·기술적 지표와 반도체 관련 사실만 근거로 판단하세요. 다른 지수·거시 지표는 다루지 마세요.
-SOX가 ±1.5% 이상이면 그 방향에 무게를, ±0.5% 이내면 confidence를 낮게. {_SCHEMA}"""
+SOX가 ±1.5% 이상이면 그 방향에 무게를, ±0.5% 이내면 confidence를 낮게.
+(V3.36) 'AI업계' 자료(엔비디아·OpenAI 등 공식 발표, 미국 공시, 커뮤니티)가 있으면 HBM·AI 서버 수요처럼 삼성전자·SK하이닉스에
+직접 이어지는 소식만 근거로 쓰세요. '커뮤니티·미확인' 출처는 단독 근거로 쓰지 말고 공식 발표·지표와 함께만 언급하세요. {_SCHEMA}"""
 
 NEWS_PROMPT = f"""당신은 뉴스·심리 분석가(News Sentiment Analyst) 에이전트입니다.
 주어진 최근 뉴스 제목만 근거로 국내 증시(KOSPI) 시장 심리를 판단하세요. 제목은 [N번] [날짜][종목명][매체] 형식으로
@@ -76,7 +84,7 @@ def _reg_block(reg, groups) -> str:
 def run_technical(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalysis, reg: Optional[list] = None) -> dict:
     prompt = (f"기준 시점: {snapshot.as_of}\n\n미국 지수 및 기술적 지표(코드로 계산됨):\n{_idx_lines(snapshot.us_indices)}\n"
               f"\n장세: 추세={ma.regime_trend}, 변동성={ma.regime_volatility}"
-              f"{_reg_block(reg, {'us', 'quant'})}\n기술적 관점에서 판단하세요.")
+              f"{_reg_block(reg, {'us', 'quant', 'base_rate'})}\n기술적 관점에서 판단하세요.")
     return llm.complete_json(TECHNICAL_PROMPT, prompt, max_tokens=900)
 
 
@@ -94,7 +102,7 @@ def run_semiconductor(llm: LLMClient, snapshot: MarketSnapshot, ma: MarketAnalys
     hint = f"규칙엔진 방향 힌트: {ma.direction_hint or '중립'} ({ma.direction_hint_reason or '-'})"
     prompt = (f"기준 시점: {snapshot.as_of}\n\nSOX(필라델피아 반도체):\n{_idx_lines(snapshot.us_indices, {'SOX'})}\n"
               f"참고(나스닥): {_idx_lines(snapshot.us_indices, {'나스닥'})}\n{hint}"
-              f"{_reg_block([e for e in reg if e['group'] != 'us' or e['name'] in ('SOX', '나스닥')] if reg else None, {'us'})}"
+              f"{_reg_block([e for e in reg if e['group'] != 'us' or e['name'] in ('SOX', '나스닥')] if reg else None, {'us', 'ai_industry', 'disclosure', 'base_rate'})}"
               f"\n반도체 관점에서 판단하세요.")
     return llm.complete_json(SEMI_PROMPT, prompt, max_tokens=900)
 
@@ -183,7 +191,7 @@ def run_news_sentiment(llm: LLMClient, snapshot: MarketSnapshot, titles: list[st
                 "notable_points": [], "skipped": True}
     news_reg = [e for e in (reg or []) if e["kind"] == "N"]
     if news_reg:  # 뉴스마다 ID·매체·수집 경로를 붙여 준다
-        body = registry_text(news_reg, {"news"}, title="최근 뉴스 목록")
+        body = registry_text(news_reg, {"news", "disclosure"}, title="최근 뉴스·개장 전 공시 목록")
     else:
         body = f"최근 뉴스 제목 {len(titles)}건:\n" + "\n".join(f"- {t}" for t in titles)
     prompt = f"기준 시점: {snapshot.as_of}\n\n{body}\n\n시장 심리 관점에서 판단하세요."

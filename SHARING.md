@@ -18,13 +18,19 @@ GitHub에는 소스만 Private 저장소로 보관한다. 협업자를 추가하
 
 ### KOSPI 시세 전용 자동 게시 (2026-09-29)
 
-- Windows 작업 `TradingAgents-KR PublicQuotes`: 로그인된 PC에서 5분마다 `pythonw -B -m tools.refresh_public_quotes` 실행. 배터리에서도 실행하며, 중복 실행은 건너뛰고 3분 후 종료한다. 절전 PC를 깨우거나 로그인 정보를 저장하지 않는다.
-- 기존 공개 HTML의 KOSPI 숫자·차트·시세 기준 시각만 변경한다. 장중 값은 미확정으로 표시한다. AI 분석, 정식 채점, 모의계좌 평가·매매, 예측 DB 쓰기는 하지 않는다. 미국 지수·거시 지표는 분석 당시 값이다.
+- Windows 작업 `TradingAgents-KR PublicQuotes`: 로그인된 PC에서 10분마다 `pythonw -B -m tools.refresh_public_quotes` 실행. 배터리에서도 실행하며, 중복 실행은 건너뛰고 3분 후 종료한다. 절전 PC를 깨우거나 로그인 정보를 저장하지 않는다.
+- 기존 공개 HTML의 KOSPI 숫자·차트·시세 기준 시각과 이미 저장된 모의계좌·보고서 요약을 다시 반영한다. 장중 값은 미확정으로 표시한다. 이 작업 자체가 AI 분석, 정식 채점, 모의계좌 평가·매매, 예측 DB 쓰기를 실행하지는 않는다. 미국 지수·거시 지표는 분석 당시 값이다.
 - 네이버 시세 조회는 키 없이 수행하며, 공개 페이지는 외부 연결 차단을 유지한다. 공개 시세 수집 시각과 보고서 생성 시각·분석 시각은 별도 표시한다.
-- 같은 시세는 재게시하지 않는다. 수집·보안 검증·업로드 실패 시 기존 공개본을 유지한다. 결과는 `logs/public_quotes_status.json`에 상태와 시각만 남긴다. 실패는 다음 5분 작업에서 재시도한다.
-- GitHub Pages 기본 배포에는 시간당 10회 소프트 제한이 있으므로 5분은 조회·게시 시도 주기이며 화면 반영 SLA가 아니다. 배포 대기·브라우저 5분 새로고침까지 추가 지연이 가능하다.
+- 같은 시세는 재게시하지 않는다. 수집·보안 검증·업로드 실패 시 기존 공개본을 유지한다. 결과는 `logs/public_quotes_status.json`에 상태와 시각만 남긴다. 실패는 다음 10분 작업에서 재시도한다.
+- GitHub Pages 기본 배포의 시간당 10회 권장 한도를 고려해 게시 점검은 10분 간격이다. 이는 화면 반영 보장 시간이 아니며 배포 대기·브라우저 5분 확인까지 추가 지연이 가능하다. 모의계좌의 별도 5분 점검 주기는 유지한다.
 - 중지: PowerShell에서 `Disable-ScheduledTask -TaskName 'TradingAgents-KR PublicQuotes'`. 재개: `Enable-ScheduledTask -TaskName 'TradingAgents-KR PublicQuotes'`.
 - 설치/복구: 프로젝트의 `tools/register_public_quotes.ps1` 실행. 기존 아침 분석·마감 채점 작업은 변경하지 않는다.
+
+### 아침 분석 누락 재시도 (2026-10-22)
+
+- Windows 작업 `TradingAgents-KR MorningRetry`: 로그인된 PC에서 평일 08:20에 실행한다. KRX 거래일이고 08:20~08:45 사이이며 당일 실제 분석·완료 기록이 없을 때만 기존 아침 분석을 한 번 다시 시도한다. 유료 모델 호출은 이 누락 상황에서만 발생할 수 있다.
+- 당일 재시도 영수증 `logs/morning_retry_YYYY-MM-DD.json`으로 중복을 막는다. 07:30 작업이 아직 실행 중이면 아침 작업 잠금이 중복 분석을 막는다. 휴장·완료·시간 경과에는 분석을 시작하지 않는다.
+- 로그인·전원·네트워크가 필요하다. PC가 꺼졌거나 절전 중이면 실행을 보장하지 않으며, 늦게 시작하더라도 08:45 이후에는 분석을 건너뛴다. 중지: `Disable-ScheduledTask -TaskName 'TradingAgents-KR MorningRetry'`; 복구: `tools/register_morning_retry.ps1`.
 
 `공유페이지_만들기.bat` 또는 `python cli.py export-site` 실행 후 `site/index.html` 한 파일만 전달한다. 보고서는 생성 당시의 스냅샷이며 자동 갱신되지 않는다. 사용자가 공유를 허용한 가상계좌 수익률·평가금액·수익곡선·보유 종목·최근 모의 체결 내역을 포함한다. 화면에는 모의투자이며 실제 자금 거래가 없다고 표시한다. 공유본에는 API 호출 기능이 없으며 뉴스 제목 및 키 마스킹을 적용한다. 외부 폰트 요청 없이 브라우저 기본 대체 폰트를 사용한다. 원본 계좌 JSON·API 키·DB는 계속 GitHub에서 제외한다.
 
@@ -49,3 +55,13 @@ API 서버 전체를 공개하지 말고 공유 HTML만 별도 정적 사이트�
 - https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/
 - https://developers.cloudflare.com/cloudflare-one/access-controls/policies/
 - https://developers.cloudflare.com/pages/platform/known-issues/
+
+## 개인정보·외부 전송 점검 (2026-10-22, V3.33)
+
+- 공개 저장소 커밋 작성자를 GitHub noreply 주소(`310007092+klee0104-ops@users.noreply.github.com`)로 고정. 예전 커밋 100여 건에는 계정 Gmail 이 작성자로 남아 있었다.
+- 게시할 때마다 부모 없는 커밋 1개로 `main` 을 교체(force). 공개 저장소에 지난 공개본 이력이 쌓이지 않는다. 첫 게시 이후 옛 커밋은 목록에서 사라지지만, SHA 를 이미 아는 사람·외부 보관본에는 남을 수 있다.
+- 공개본 검사에 개인 메일(gmail·naver 등), PC 사용자 경로, 계좌·주민·휴대폰 번호 형태, 계좌 관련 필드명(account_no·cano·계좌번호·kiwoom·app_key) 차단 추가.
+- 외부 AI(Gemini/Anthropic) 호출 직전 이메일·전화·계좌번호·PC 경로·등록된 키를 가린다(시장 수치는 유지).
+- 키움 REST API 키 이름(KIWOOM_APP_KEY, KIWOOM_SECRET_KEY)을 비밀값으로 미리 등록: 자격 증명 관리자 저장, 로그·공개본·AI 입력 자동 가림, 소스 스캔 대상.
+- 사용자 직접 설정 필요: GitHub → Settings → Emails 에서 "Keep my email addresses private", "Block command line pushes that expose my email" 켜기.
+- 접근 범위: GitHub Pages 는 접근 제한을 걸 수 없다(링크·저장소 공개). "지인 전용"이 필요하면 접속 제한이 되는 호스팅으로 옮겨야 한다.

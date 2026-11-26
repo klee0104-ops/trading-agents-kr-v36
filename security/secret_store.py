@@ -31,9 +31,18 @@ DOTENV_PATH = PROJECT_ROOT / ".env"
 KEY_NAMES = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
+    "dart": "DART_API_KEY",
+    "alpaca_id": "APCA_API_KEY_ID",
+    "alpaca_secret": "APCA_API_SECRET_KEY",
     # 네이버 개발자센터 검색 API (뉴스). 둘 다 있어야 공식 API를 쓴다.
     "naver_id": "NAVER_CLIENT_ID",
     "naver_secret": "NAVER_CLIENT_SECRET",
+    # (V3.33) 키움증권 REST API — 연결 전 미리 등록: 저장은 자격 증명 관리자, 로그·공개본·AI 입력에서 자동 가림
+    "kiwoom_appkey": "KIWOOM_APP_KEY",
+    "kiwoom_secret": "KIWOOM_SECRET_KEY",
+    # (V3.36) 레딧 무료(비상업) API — reddit.com/prefs/apps 에서 script 앱 생성 후 저장. 없으면 레딧만 건너뜀
+    "reddit_id": "REDDIT_CLIENT_ID",
+    "reddit_secret": "REDDIT_CLIENT_SECRET",
 }
 
 # 알려진 API 키 형태. 로그/에러 메시지 마스킹과 비밀값 스캔에 공통으로 쓴다.
@@ -44,6 +53,10 @@ SECRET_PATTERNS = [
     re.compile(r"sk-(?:proj-)?[A-Za-z0-9_\-]{32,}"),     # OpenAI 형태 (혹시 섞여 들어올 때 대비)
     # 네이버 검색 API 키는 형태가 짧고 일반적이라, 변수명과 함께 적힌 값만 잡는다
     re.compile(r"NAVER_CLIENT_(?:ID|SECRET)\s*[=:]\s*['\"]?([A-Za-z0-9_\-]{8,})"),
+    # OpenDART 키는 일반적인 40자리 문자열이므로 키 이름/쿼리 인자와 함께 있을 때만 탐지한다.
+    re.compile(r"(?:DART_API_KEY|crtfc_key)\s*[=:]\s*['\"]?([A-Za-z0-9]{40})", re.I),
+    re.compile(r"(?:APCA_API_KEY_ID|APCA_API_SECRET_KEY)\s*[=:]\s*['\"]?([A-Za-z0-9_\-]{20,})", re.I),
+    re.compile(r"(?:KIWOOM_APP_KEY|KIWOOM_SECRET_KEY|appkey|secretkey)\s*[=:\"']+\s*['\"]?([A-Za-z0-9_\-]{16,})", re.I),
 ]
 
 # 예시/자리표시자 값: "sk-ant-...", "AIza...", "your-key-here", "<YOUR_KEY>", "여기에 키 입력" 등
@@ -104,11 +117,14 @@ def mask(value: Optional[str]) -> str:
     return f"{head}…{value[-4:]}"
 
 
-def is_placeholder(value: Optional[str]) -> bool:
+_SHORT_ID_PROVIDERS = {"reddit_id": 10}  # (V3.36) 레딧 앱 ID 는 14~22자라 일반 최소 길이(20)보다 짧을 수 있다
+
+
+def is_placeholder(value: Optional[str], min_len: int = _MIN_KEY_LEN) -> bool:
     if not value:
         return True
     v = value.strip()
-    return len(v) < _MIN_KEY_LEN or bool(_PLACEHOLDER_RE.search(v))
+    return len(v) < min_len or bool(_PLACEHOLDER_RE.search(v))
 
 
 # ---------------------------------------------------------------- .env 읽기
@@ -152,8 +168,10 @@ def _keyring_get(name: str) -> Optional[str]:
 
 def store_in_keyring(provider: str, value: str) -> None:
     name = _key_name(provider)
-    if is_placeholder(value):
+    if is_placeholder(value, _SHORT_ID_PROVIDERS.get(provider.strip().lower(), _MIN_KEY_LEN)):
         raise ValueError("유효한 API 키 형태가 아닙니다 (너무 짧거나 예시 값입니다).")
+    if provider.strip().lower() == "dart" and not re.fullmatch(r"[A-Za-z0-9]{40}", value.strip()):
+        raise ValueError("OpenDART 인증키는 영문·숫자 40자리여야 합니다.")
     if not keyring_available():
         raise RuntimeError(
             "OS 자격 증명 저장소를 사용할 수 없습니다. `pip install keyring` 후 다시 시도하거나, "
@@ -202,19 +220,20 @@ _PROCESS_ENV_SNAPSHOT = dict(os.environ)
 def get_api_key(provider: str) -> SecretStr:
     """우선순위(환경변수 > OS 자격 증명 저장소 > .env)에 따라 키를 찾는다. 없으면 빈 SecretStr."""
     name = _key_name(provider)
+    min_len = _SHORT_ID_PROVIDERS.get(provider.strip().lower(), _MIN_KEY_LEN)
 
     v = _PROCESS_ENV_SNAPSHOT.get(name)
-    if v and not is_placeholder(v):
+    if v and not is_placeholder(v, min_len):
         register_runtime_secret(v)
         return SecretStr(v.strip(), "environment")
 
     v = _keyring_get(name)
-    if v and not is_placeholder(v):
+    if v and not is_placeholder(v, min_len):
         register_runtime_secret(v)
         return SecretStr(v.strip(), "keyring")
 
     v = _read_dotenv().get(name)
-    if v and not is_placeholder(v):
+    if v and not is_placeholder(v, min_len):
         register_runtime_secret(v)
         return SecretStr(v.strip(), ".env")
 
@@ -272,7 +291,7 @@ def redact(text) -> str:
     for pat in SECRET_PATTERNS:
         s = pat.sub(lambda m: mask(m.group(0)), s)
     # URL 쿼리스트링의 key=... 형태 (Google API가 쓰는 방식)
-    s = re.sub(r"([?&](?:key|api_key|apikey)=)[^&\s\"']+", r"\1****", s, flags=re.IGNORECASE)
+    s = re.sub(r"([?&](?:key|api_key|apikey|crtfc_key)=)[^&\s\"']+", r"\1****", s, flags=re.IGNORECASE)
     return s
 
 

@@ -42,6 +42,8 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 # 서버 프로세스가 뜰 때마다 새로 만드는 1회용 토큰. 디스크에 저장하지 않는다.
 SESSION_TOKEN = secrets.token_urlsafe(32)
 _RUN_LOCK = threading.Lock()
+_MANUAL_LOCK = threading.Lock()
+_MANUAL_PREVIEWS: dict[str, dict] = {}
 
 _MAX_COLLECT_DAYS = 400
 _STOCK_NAME_RE = re.compile(r"^[0-9A-Za-z가-힣&\.\-\s]{1,40}$")
@@ -144,6 +146,19 @@ def health():
         "key_source": key.source,
         "readonly": Config.WEB_READONLY,
     })
+
+
+@app.route("/api/us-paper")
+def us_paper():
+    """Local read-only U.S. paper account; never contacts Alpaca or runs analysis."""
+    from tools.us_paper import _read, _safe_plan, paths
+    from us_market.ledger import public_summary
+    try:
+        account_path, plan_path = paths()
+        return jsonify({"paper": public_summary(_read(account_path)),
+                          "plan": _safe_plan(_read(plan_path), include_reports=True)})
+    except (OSError, ValueError, KeyError, TypeError):
+        return jsonify({"paper": None, "plan": None})
 
 
 @app.route("/api/history")
@@ -295,6 +310,15 @@ def long_research_report():
     except Exception as e: return _safe_error(e)
 
 
+@app.route("/api/medium-research", methods=["GET"])
+def medium_research_report():
+    from memory.long_report import load
+    from memory.medium_report import public_summary
+    from data.sessions import kst_now
+    try: return jsonify(public_summary(load(Config.LONG_RESEARCH_PATH),kst_now()))
+    except Exception as e: return _safe_error(e)
+
+
 @app.route("/api/paper")
 def paper_account():
     """(V3.21) 가상 계좌 요약."""
@@ -303,6 +327,50 @@ def paper_account():
         from execution.split_portfolio import read_summary
         split = read_summary(Config.PAPER_PORTFOLIO_PATH)
         if split is not None:
+            from execution.paper_activity import summarize as paper_activity
+            from memory.outcome_store import load_last_outcome
+            from memory.long_report import read_public
+            from data.sessions import kst_now
+            latest = load_last_outcome(Config.LAST_OUTCOME_PATH) or {}
+            split['activity'] = paper_activity(latest.get('outcome') or {}, split,
+                                               read_public(Config.LONG_RESEARCH_PATH), kst_now())
+            from execution.paper_opportunity import read_summary as opportunity_summary
+            split['opportunity_study'] = opportunity_summary(
+                Path(Config.PAPER_PORTFOLIO_PATH).parent / 'logs' / 'paper_opportunity_study.json')
+            review_state = {}
+            try:
+                import json
+                review_path=Path(Config.SHORT_INTRADAY_REVIEW_PATH)
+                if review_path.parent.resolve()==Path(Config.PAPER_PORTFOLIO_PATH).parent.resolve():
+                    review=json.loads(review_path.read_text(encoding='utf-8'))
+                    review_state=review if isinstance(review,dict) else {}
+                    plan=review_state.get('plan') or {}
+                    plan=plan if isinstance(plan,dict) else {}
+                    from tools.short_intraday_review import MAX_REVIEWS_PER_DAY
+                    split['short_intraday_review']={
+                        'status':str(review_state.get('last_status') or '자료 대기')[:100],
+                        'attempts':review_state.get('attempts',0),
+                        'max_attempts':MAX_REVIEWS_PER_DAY,
+                        'last_attempt_at':review_state.get('last_attempt_at'),
+                        'plan_status':plan.get('status'),
+                        'selected_code':plan.get('selected_code'),
+                        'weight':plan.get('weight'),
+                        'expires_at':plan.get('expires_at'),
+                        'trigger':plan.get('trigger'),
+                        'qa_reason':(plan.get('qa') or {}).get('reason')}
+            except (OSError,ValueError,TypeError,KeyError):
+                pass
+            try:
+                import json
+                from execution.next_buy_plan import summarize as next_buy_summary
+                from memory.long_report import load as load_long, decision as long_decision
+                from data.sessions import kst_now
+                now=kst_now()
+                paper_state=json.loads(Path(Config.PAPER_PORTFOLIO_PATH).read_text(encoding='utf-8'))
+                long_plan=long_decision(load_long(Config.LONG_RESEARCH_PATH),now)
+                split['next_buy_plan']=next_buy_summary(paper_state,latest,review_state,long_plan,now)
+            except (OSError,ValueError,TypeError,KeyError):
+                split['next_buy_plan']={'status':'unavailable'}
             return jsonify(split)
         return jsonify(PaperAccount(Config.PAPER_ACCOUNT_PATH, Config.PAPER_INITIAL_CASH).summary())
     except Exception as e:  # noqa: BLE001
@@ -314,6 +382,94 @@ def paper_comparison():
     from execution.aggressive_shadow import read_comparison
     try: return jsonify(read_comparison(Config.PAPER_PORTFOLIO_PATH, Config.PAPER_AGGRESSIVE_PATH))
     except Exception as e: return _safe_error(e)
+
+
+@app.route("/api/paper/manual/preview", methods=["POST"])
+def manual_paper_preview():
+    """Two-step, local-only simulation. A preview never changes the ledger."""
+    import hashlib
+    import json
+    import time as clock
+    from execution.manual_paper import BUY_WEIGHTS, ManualOrderError, fetch_quotes, prepare
+    from tools.paper_portfolio import locked
+    body = request.get_json(silent=True) or {}
+    if set(body) != {'side', 'code', 'weight'}:
+        return jsonify({'error':'매매 방향·ETF 코드·비중만 입력해 주세요.'}), 400
+    if (body['side'] not in ('buy','sell') or body['code'] not in ('069500','114800')
+            or (body['side']=='buy' and (type(body['weight']) not in (int,float) or body['weight'] not in BUY_WEIGHTS))
+            or (body['side']=='sell' and body['weight'] is not None)):
+        return jsonify({'error':'단기 ETF 매수는 5%·10%, 매도는 전량만 허용합니다.'}), 400
+    path = Path(Config.PAPER_PORTFOLIO_PATH)
+    try:
+        with locked(path):
+            original = path.read_bytes()
+            state = json.loads(original)
+        quotes, now = fetch_quotes(state, body['code'])
+        _, trade = prepare(state, body['side'], body['code'], body['weight'], quotes, now)
+        token = secrets.token_urlsafe(24)
+        proposal = {'expires':clock.monotonic()+60,
+                    'ledger_hash':hashlib.sha256(original).hexdigest(),
+                    'side':body['side'],'code':body['code'],'weight':body['weight'],
+                    'price':quotes[body['code']]['value']}
+        with _MANUAL_LOCK:
+            for old in [key for key, value in _MANUAL_PREVIEWS.items() if value['expires'] < clock.monotonic()]:
+                _MANUAL_PREVIEWS.pop(old, None)
+            if len(_MANUAL_PREVIEWS) >= 8:
+                _MANUAL_PREVIEWS.pop(min(_MANUAL_PREVIEWS, key=lambda key:_MANUAL_PREVIEWS[key]['expires']))
+            _MANUAL_PREVIEWS[token] = proposal
+        return jsonify({'preview_id':token, 'expires_seconds':60,
+                        'trade':{k:trade[k] for k in ('at','name','ticker','side','qty','price','fee','realized_pnl')},
+                        'source':'네이버 증권 당일 체결 시세 · 가상 슬리피지/비용 반영',
+                        'note':'AI·QA 승인 매매와 별도 기록됩니다. 확인을 누르기 전에는 원장이 바뀌지 않습니다.'})
+    except ManualOrderError as exc:
+        return jsonify({'error':str(exc)}), 409
+    except (BlockingIOError, FileNotFoundError):
+        return jsonify({'error':'모의계좌가 사용 중이거나 초기화되지 않았습니다.'}), 409
+    except Exception:
+        return jsonify({'error':'수동 체결 미리보기를 만들지 못했습니다.'}), 500
+
+
+@app.route("/api/paper/manual/execute", methods=["POST"])
+def manual_paper_execute():
+    """Consume one preview, refetch quotes, audit and atomically write once."""
+    import hashlib
+    import json
+    import shutil
+    import time as clock
+    from execution.manual_paper import ManualOrderError, fetch_quotes, prepare
+    from execution.split_portfolio import summary_at
+    from tools.paper_portfolio import locked, write
+    body = request.get_json(silent=True) or {}
+    token = body.get('preview_id')
+    if set(body) != {'preview_id', 'confirm'} or type(token) is not str or len(token) > 100 or body.get('confirm') is not True:
+        return jsonify({'error':'유효한 미리보기와 명시적 확인이 필요합니다.'}), 400
+    with _MANUAL_LOCK:
+        proposal = _MANUAL_PREVIEWS.pop(token, None)
+    if proposal is None or proposal['expires'] < clock.monotonic():
+        return jsonify({'error':'미리보기가 만료됐습니다. 다시 확인해 주세요.'}), 409
+    path = Path(Config.PAPER_PORTFOLIO_PATH)
+    try:
+        with locked(path):
+            original = path.read_bytes()
+            if hashlib.sha256(original).hexdigest() != proposal['ledger_hash']:
+                raise ManualOrderError('계좌가 갱신됐습니다. 다시 미리보기를 확인해 주세요.')
+            state = json.loads(original)
+            quotes, now = fetch_quotes(state, proposal['code'])
+            if abs(quotes[proposal['code']]['value']/proposal['price']-1) > .005:
+                raise ManualOrderError('시세가 0.5% 넘게 변했습니다. 다시 미리보기를 확인해 주세요.')
+            updated, trade = prepare(state, proposal['side'], proposal['code'], proposal['weight'], quotes, now)
+            backup = path.parent / '.review-backups' / ('manual-'+now.strftime('%Y%m%d-%H%M%S')+'-'+token[:8]+'.json')
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, backup)
+            write(path, updated)
+        return jsonify({'status':'filled','trade':{k:trade[k] for k in ('at','name','ticker','side','qty','price','fee','realized_pnl')},
+                        'paper':summary_at(updated, now)})
+    except ManualOrderError as exc:
+        return jsonify({'error':str(exc)}), 409
+    except (BlockingIOError, FileNotFoundError):
+        return jsonify({'error':'모의계좌가 사용 중이거나 초기화되지 않았습니다.'}), 409
+    except Exception:
+        return jsonify({'error':'수동 체결을 완료하지 못했습니다. 원장 상태를 새로고침해 확인해 주세요.'}), 500
 
 
 @app.route("/api/backtest")
@@ -430,7 +586,7 @@ def run_pipeline():
 @app.route("/api/company-research", methods=["GET"])
 def company_research_library():
     from tools.company_research import read_public
-    return jsonify(read_public(Config.COMPANY_RESEARCH_PATH,Config.LONG_RESEARCH_PATH))
+    return jsonify(read_public(Config.COMPANY_RESEARCH_PATH,Config.LONG_RESEARCH_PATH,Config.LAST_OUTCOME_PATH))
 
 @app.route("/api/company-research/run", methods=["POST"])
 def company_research_run():

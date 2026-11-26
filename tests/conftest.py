@@ -6,10 +6,11 @@ os.environ.setdefault("TA_NO_NEWS", "1")
 # 모든 데이터 경로를 임시 폴더로 고정한다 (verify_harness 가 이미 지정했으면 그 값을 쓴다).
 _TA_TMP = tempfile.mkdtemp(prefix="ta-pytest-")
 for _k, _f in {"MEMORY_DB_PATH": "memory.json", "LESSONS_PATH": "lessons.json", "PAPER_ACCOUNT_PATH": "paper.json",
-               "PAPER_PORTFOLIO_PATH": "paper_portfolio.json", "LONG_RESEARCH_PATH": "long_research.json",
+               "PAPER_PORTFOLIO_PATH": "paper_portfolio.json", "PAPER_SHADOW_V2_PATH": "paper_shadow_v2.json", "PAPER_INTRADAY_PATH": "paper_intraday.json", "LONG_RESEARCH_PATH": "long_research.json",
                "REPORT_ARCHIVE_PATH": "research_reports.json", "LAST_OUTCOME_PATH": "outcome.json",
-               "EVENT_ARCHIVE_DB_PATH": "events.db"}.items():
+               "EVENT_ARCHIVE_DB_PATH": "events.db", "BREAKING_NEWS_PATH": "breaking_news.json"}.items():
     os.environ.setdefault(_k, os.path.join(_TA_TMP, _f))
+os.environ.setdefault('PAPER_SHADOW_V2_ENABLED', 'false')
 
 import pytest
 

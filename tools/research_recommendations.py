@@ -1,6 +1,6 @@
 """Explicit local batch for today's analysis candidates; no portfolio updates."""
 from pathlib import Path
-from tools.company_research import directory,research_one
+from tools.company_research import MAX_STORED_REPORTS,directory,research_one
 from tools.paper_portfolio import locked,write
 from memory.long_report import load
 
@@ -23,19 +23,31 @@ def run_batch(path,long_path,outcome_path,now,client_factory,progress=lambda x:N
             budget['codes'].append(code);write(Path(path),state)
             item=research_one(universe,code,now,client_factory)
             item['origin']='explicit_today_batch';item['prediction_saved_at']=envelope['saved_at']
-            state['reports']=(state.get('reports',[])+[item])[-20:];write(Path(path),state)
+            state['reports']=(state.get('reports',[])+[item])[-MAX_STORED_REPORTS:];write(Path(path),state)
             results.append(item);progress({'code':code,'status':item['status'],'calls':item.get('calls')})
     return results
+
+def run_scheduled(path,long_path,outcome_path,now,client_factory,progress=lambda x:None):
+    """The weekday task is a no-op until today's completed analysis exists."""
+    envelope=load(outcome_path)
+    if str(envelope.get('saved_at',''))[:10]!=str(now.date()):
+        progress({'status':'waiting_for_today_analysis'})
+        return []
+    return run_batch(path,long_path,outcome_path,now,client_factory,progress)
 
 def main():
     import argparse,json
     from config import Config
     from data.sessions import kst_now
     from cli import _real_llm
-    parser=argparse.ArgumentParser();parser.add_argument('--today-recommendations',action='store_true');a=parser.parse_args()
-    if not a.today_recommendations:parser.error('Explicit batch flag required')
+    parser=argparse.ArgumentParser()
+    flags=parser.add_mutually_exclusive_group(required=True)
+    flags.add_argument('--today-recommendations',action='store_true')
+    flags.add_argument('--scheduled',action='store_true')
+    a=parser.parse_args()
     if not Config.api_key():raise SystemExit('Local API key missing')
-    run_batch(Path(Config.COMPANY_RESEARCH_PATH),Config.LONG_RESEARCH_PATH,Config.LAST_OUTCOME_PATH,kst_now(),_real_llm,
-              lambda status:print(json.dumps(status),flush=True))
+    runner=run_scheduled if a.scheduled else run_batch
+    runner(Path(Config.COMPANY_RESEARCH_PATH),Config.LONG_RESEARCH_PATH,Config.LAST_OUTCOME_PATH,kst_now(),_real_llm,
+           lambda status:print(json.dumps(status),flush=True))
 
 if __name__=='__main__':main()

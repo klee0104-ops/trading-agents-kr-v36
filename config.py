@@ -11,6 +11,7 @@
 상속되기 때문이다.
 """
 import os
+import math
 
 # 반드시 .env를 읽기 "전에" import 해야 한다 — 진짜 시스템 환경변수 스냅샷을 먼저 뜬다.
 from security.secret_store import (
@@ -23,6 +24,13 @@ for _k, _v in _read_dotenv(DOTENV_PATH).items():
     os.environ.setdefault(_k, _v)
 
 install_global_redaction()
+
+
+def _experiment_setting(name, default, minimum, maximum):
+    value = float(os.environ.get(name, str(default)))
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError(f'Invalid experimental setting: {name}')
+    return value
 
 
 class Config:
@@ -45,7 +53,29 @@ class Config:
     PAPER_INITIAL_CASH = float(os.environ.get("PAPER_INITIAL_CASH", "10000000"))       # 시작 자금(원)
     PAPER_PORTFOLIO_PATH = os.environ.get("PAPER_PORTFOLIO_PATH", os.path.join(os.path.dirname(PAPER_ACCOUNT_PATH), "paper_portfolio.json"))
     PAPER_AGGRESSIVE_PATH = os.environ.get("PAPER_AGGRESSIVE_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "paper_aggressive.json"))
+    PAPER_SHADOW_V2_PATH = os.environ.get("PAPER_SHADOW_V2_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "paper_shadow_v2.json"))
+    PAPER_SHADOW_V2_ENABLED = os.environ.get("PAPER_SHADOW_V2_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+    # Shadow-only experiments. These are proposed settings, not optimized or
+    # demonstrated to improve returns; they never change the live paper book.
+    ACTIVATION_MIN_EDGE = _experiment_setting('ACTIVATION_MIN_EDGE', .04, 0, .10)
+    ACTIVATION_TARGET_VOL_PCT = _experiment_setting('ACTIVATION_TARGET_VOL_PCT', 20, 1, 50)
+    ACTIVATION_VOL_FLOOR = _experiment_setting('ACTIVATION_VOL_FLOOR', .60, .25, 1)
+    ACTIVATION_CONSENSUS_BOOST = _experiment_setting('ACTIVATION_CONSENSUS_BOOST', 1.25, 1, 1.25)
+    ACTIVATION_WEAK_WEIGHT = _experiment_setting('ACTIVATION_WEAK_WEIGHT', .20, 0, .20)
+    ACTIVATION_STRONG_WEIGHT = _experiment_setting('ACTIVATION_STRONG_WEIGHT', .40, .20, .40)
+    ACTIVATION_MAX_WEIGHT = _experiment_setting('ACTIVATION_MAX_WEIGHT', .50, .40, .50)
+    ACTIVATION_PROBE_WEIGHT = _experiment_setting('ACTIVATION_PROBE_WEIGHT', .10, .05, .10)
+    PAPER_INTRADAY_PATH = os.environ.get("PAPER_INTRADAY_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "paper_intraday.json"))
+    PAPER_BASKET_PATH = os.environ.get("PAPER_BASKET_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "paper_etf_basket.json"))
+    PAPER_BASKET_PLAN_PATH = os.environ.get("PAPER_BASKET_PLAN_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "paper_etf_basket_plan.json"))
+    SHORT_INTRADAY_REVIEW_PATH = os.environ.get("SHORT_INTRADAY_REVIEW_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "short_intraday_review.json"))
+    # (V3.35) 속보 긴급이슈: 규칙 1차 + AI 2차(하루 최대 8회), 공개 사이트 배너, 장중 재판단 앞당김
+    BREAKING_NEWS_PATH = os.environ.get("BREAKING_NEWS_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "breaking_news.json"))
+    BREAKING_NEWS_ENABLED = os.environ.get("BREAKING_NEWS_ENABLED", "1") == "1"
+    PAPER_INTRADAY_ENABLED = os.environ.get("PAPER_INTRADAY_ENABLED", "true").strip().lower() in ("1", "true", "yes")
     LONG_RESEARCH_PATH = os.environ.get("LONG_RESEARCH_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "long_research.json"))
+    # (V3.37) 기준 비율 계산용 과거 일봉 캐시(^SOX·^KS11, 6일마다 갱신)
+    BASE_RATE_CACHE_PATH = os.environ.get("BASE_RATE_CACHE_PATH", os.path.join(os.path.dirname(PAPER_PORTFOLIO_PATH), "base_rate_cache.json"))
     COMPANY_RESEARCH_PATH = os.environ.get("COMPANY_RESEARCH_PATH", os.path.join(os.path.dirname(LONG_RESEARCH_PATH), "company_research.json"))
     REPORT_ARCHIVE_PATH = os.environ.get("REPORT_ARCHIVE_PATH", os.path.join(os.path.dirname(LONG_RESEARCH_PATH), "research_reports.json"))
     POSTMORTEM = os.environ.get("POSTMORTEM", "true").lower() in ("1", "true", "yes")  # 채점 후 복기 AI 호출

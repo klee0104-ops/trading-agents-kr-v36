@@ -33,7 +33,8 @@ def test_unresolved_gives_neutral_signal_text():
     m = normalize_moderation({"debate_quality": "unresolved", "summary": "평행선"}, TR)
     assert m["neutral_signal"] is True
     txt = build_moderation_text(m)
-    assert "45~55" in txt and "미해결" in txt
+    assert "확신을 낮추고" in txt and "미해결" in txt
+    assert "45~55" not in txt and "50 근처" not in txt
 
 
 def test_repeated_turns_downgrade_resolved():

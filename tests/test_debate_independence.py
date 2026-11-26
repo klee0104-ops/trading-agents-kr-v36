@@ -54,8 +54,10 @@ def test_missing_or_ambiguous_qa_never_passes(items, quant):
     llm = Reply({'results': items})
     out = verify_debate_evidence(llm, [{'stance': 'bull', 'evidence': ['a', 'b']}], {}, quant=quant)
     assert out[0]['verified_count'] == 0
-    assert out[0]['unverified'] == ['a', 'b']
-    assert len(llm.prompts) == 1
+    # (V3.31) 응답과 하나도 연결되지 않으면 '미검증'이 아니라 '판정 불가'로 분리(1회 재시도). 어느 쪽이든 승인은 0건.
+    assert sorted(out[0]['unverified'] + out[0]['qa_unknown']) == ['a', 'b']
+    assert not (set(out[0]['unverified']) & set(out[0]['qa_unknown']))
+    assert len(llm.prompts) == (1 if out[0]['unverified'] else 2)
 
 
 def test_partial_qa_only_credits_explicit_true():

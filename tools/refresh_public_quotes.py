@@ -108,8 +108,11 @@ def run(root=ROOT):
     from config import Config
     from memory.long_report import read_public
     from tools.company_research import read_public as company_public
-    updated['company_research']=company_public(Config.COMPANY_RESEARCH_PATH,Config.LONG_RESEARCH_PATH)
+    updated['company_research']=company_public(Config.COMPANY_RESEARCH_PATH,Config.LONG_RESEARCH_PATH,Config.LAST_OUTCOME_PATH)
     updated['long_research'] = read_public(Config.LONG_RESEARCH_PATH)
+    from memory.long_report import load as load_research
+    from memory.medium_report import public_summary as medium_public_summary
+    updated['medium_research'] = medium_public_summary(load_research(Config.LONG_RESEARCH_PATH), now)
     from memory.research_reports import sync_latest
     updated['research_reports']=sync_latest(Config.REPORT_ARCHIVE_PATH,Config.LAST_OUTCOME_PATH,Config.LONG_RESEARCH_PATH,now)
     split = read_summary(Config.PAPER_PORTFOLIO_PATH)
@@ -117,6 +120,19 @@ def run(root=ROOT):
         updated['paper'] = split
     from execution.aggressive_shadow import read_comparison
     updated['paper_comparison'] = read_comparison(Config.PAPER_PORTFOLIO_PATH, Config.PAPER_AGGRESSIVE_PATH)
+    from web.export_site import _shadow_v2_public, _paper_opportunity
+    updated['paper_shadow_v2'] = _shadow_v2_public()
+    updated['paper_opportunity'] = _paper_opportunity()
+    from execution.intraday_paper import public_summary as intraday_summary
+    updated['paper_intraday'] = intraday_summary(Config.PAPER_INTRADAY_PATH)
+    from web.export_site import _etf_basket_public, _urgent_public
+    updated['etf_basket'] = _etf_basket_public()
+    updated['urgent_issues'] = _urgent_public()  # (V3.35) 속보 긴급이슈 배너
+    from execution.paper_activity import summarize as paper_activity
+    from memory.outcome_store import load_last_outcome
+    latest = load_last_outcome(Config.LAST_OUTCOME_PATH) or {}
+    updated['paper_activity'] = paper_activity(latest.get('outcome') or {},
+                                                updated.get('paper'), updated.get('long_research'), now)
     page = '<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"></head><body>'+render_fragment(updated)+'</body></html>'
     # Validate before replacing any file or making an external write.
     harden_report(page, secrets)

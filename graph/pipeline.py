@@ -97,7 +97,12 @@ class TradingAgentsPipeline:
         # 2-0) (V3.24) 근거 자료 목록: 모든 데이터·지표·뉴스에 ID와 출처(데이터원·매체·공식 논문)를 붙인다.
         #      분석가·Bull/Bear·QA 는 이 ID로만 인용하고, 코드가 ID·수치를 대조해 어긋나면 폐기한다.
         from rules.citations import build_registry, public_registry
-        source_registry = build_registry(snapshot, quant, news_titles, LAST_NEWS_SOURCE.get("source"))
+        extras = self._premarket_extras(snapshot, news_universe)
+        if isinstance(quant, dict):
+            quant["special_tags"] = extras["special_tags"]  # 교훈 검색·기록 태그에 함께 들어간다
+        source_registry = build_registry(snapshot, quant, news_titles, LAST_NEWS_SOURCE.get("source"),
+                                         ai_titles=self._ai_titles(), disclosure_titles=extras["disclosures"],
+                                         base_rate_lines=extras["base_rate_lines"])
         spec = run_all_specialists(self.llm, snapshot, market_analysis, news_titles, registry=source_registry)
         analyst_reports = spec["reports"]
         analyst_report = spec["combined"]
@@ -123,14 +128,20 @@ class TradingAgentsPipeline:
         debate_qa = verify_debate_evidence(self.llm, transcript, analyst_report, similar_cases_context,
                                            quant=quant)
         analyst_report.pop("_registry", None)
+        from rules.consensus import compute_consensus
+        consensus = compute_consensus(analyst_reports, debate_qa, snapshot.us_indices)
 
         # 3-2) 중재자 (V3.8): 토론을 정리한다 — 확인된 근거만 남기고 쟁점/합의/소음을 분리.
-        # 미해결이면 트레이더에 "확률 50 근처" 권고(중립 신호). 방향은 정하지 않는다.
+        # 미해결이면 근거 강도만 낮게 전달한다. 확률 수치를 유도하지 않는다.
         from memory.lessons import situation_tags, build_lessons_text
         today_tags = situation_tags(asdict(market_analysis), quant, None,
                                     [{"name": q.name, "direction": q.direction} for q in snapshot.us_indices])
-        lessons = self.lessons.select_relevant(today_tags, n=5,
+        lessons = self.lessons.select_relevant(today_tags, n=8,
                                                as_of=self._as_of_date(snapshot) if self.backtest_mode else None)
+        # (V3.37) 하루짜리 교훈 검증: 비슷한 과거 검증일 표본을 붙이고, 반박된 교훈은 빼고 5개만
+        from memory.lessons import annotate_lessons
+        lessons = annotate_lessons(lessons, self.memory.all_records(),
+                                   as_of=str(self._as_of_date(snapshot)) if self.backtest_mode else None)[:5]
         lessons_text = build_lessons_text(lessons)
         moderation = run_moderator(self.llm, transcript, debate_qa, extra_context=lessons_text)
         moderation_text = build_moderation_text(moderation)
@@ -141,7 +152,7 @@ class TradingAgentsPipeline:
 
         # 4) 리스크 매니저 (+ 중재자 정리 + Strategy Manager 가중치 컨텍스트)
         risk_assessment = run_risk_manager(self.llm, transcript, weight_context=weight_context,
-                                           moderation_text=moderation_text)
+                                           moderation_text=moderation_text, debate_qa=debate_qa)
 
         # 4-1) 검증 ① 리스크 단계: 규칙엔진/과거사례와 상충할 때만 LLM 재판단
         verification = run_verification(self.llm, risk_assessment, market_analysis, similar_cases)
@@ -165,7 +176,7 @@ class TradingAgentsPipeline:
         sf_text = facts_text(stock_facts)
         from data.etf_forecast import collect as collect_etf,validate as validate_etf
         import json
-        etf_now=kst_now();etf_target=str(self._decide_target(snapshot)[2])
+        etf_now=kst_now();etf_target=str(self._run_target(snapshot)[2])
         etf_evidence=collect_etf(etf_now,etf_target) if not self._is_demo() and not self.backtest_mode else {'status':'held','sources':[]}
         source_registry.extend(etf_evidence['sources'])
         etf_context='\n[ETF 운용 전용 자료]\n'+json.dumps(etf_evidence,ensure_ascii=False)
@@ -176,13 +187,24 @@ class TradingAgentsPipeline:
                              moderation_text=moderation_text, stock_facts_text=sf_text+etf_context,
                              watch_names=[u["name"] for u in watch] or None)
 
-        # 6-0) 종목 중재자 (V3.11): 근거 없는 종목 신호를 보합으로 되돌린다 (AI 1회)
-        if watch:
-            outlook = result.get("kospi_prediction", {}).get("outlook_label") or result.get("kospi_prediction", {}).get("direction", "-")
+        # 6-0) ETF 판단이 누락되면 기존 종목 중재 1회 호출 슬롯에서 함께 복구한다.
+        # 추가 모델 호출/허위 확률 없이 별도 ETF QA를 그대로 적용한다.
+        etf_plan = validate_etf(result.get('etf_execution'), etf_evidence, etf_now, etf_target)
+        if not isinstance(result.get("kospi_prediction"), dict):  # (V3.31) null/형식 오류면 AttributeError 로 멈추던 문제
+            print("[트레이더 응답 형식 보정] kospi_prediction 이 객체가 아님 → 빈 예측으로 처리(기록 저장 안 됨)")
+            result["kospi_prediction"] = {}
+        outlook = result["kospi_prediction"].get("outlook_label") or result["kospi_prediction"].get("direction", "-")
+        if etf_evidence.get('status') == 'ok' and (etf_plan.get('etf_qa') or {}).get('passed') is not True:
+            from agents.stock_moderator import run_stock_moderator_with_etf
+            result, recovered = run_stock_moderator_with_etf(self.llm, result, sf_text, str(outlook), etf_evidence)
+            if recovered is not None:
+                etf_plan = validate_etf(recovered, etf_evidence, etf_now, etf_target)
+        elif watch:
             result = run_stock_moderator(self.llm, result, sf_text, str(outlook))
 
         # 6-0-0) (V3.16) 확률 보정: 과거 검증 기록에서 "AI 70% → 실제 몇 %"를 재서 되먹인다 (코드)
-        kp = result.get("kospi_prediction") or {}
+        kp = result.get("kospi_prediction") if isinstance(result.get("kospi_prediction"), dict) else {}
+        result["kospi_prediction"] = kp
         kp["up_probability_raw"] = kp.get("up_probability")
         calibration_note = ""
         if Config.CALIBRATE_PROBABILITY and kp.get("up_probability") is not None:
@@ -219,14 +241,17 @@ class TradingAgentsPipeline:
         else:
             final_qa = {"consistent": True, "issues": [], "llm_verification_triggered": False}
 
-        result['etf_execution']=validate_etf(result.get('etf_execution'),etf_evidence,etf_now,etf_target)
-        if final_qa.get('consistent') is not True:
+        result['etf_execution']=etf_plan
+        # Schema 3 has its own deterministic, source-bound ETF QA. The broad
+        # KOSPI/stock conclusion QA still gates those other decisions.
+        if result['etf_execution'].get('schema') not in (3,4) and final_qa.get('consistent') is not True:
             result['etf_execution'].update(status='held',selected_code=None,weight=0,note='최종 QA 미승인 · ETF 신규 매매 보류')
 
         # 7) 기록 저장 (백테스트 중에는 실거래 기록과 섞이지 않도록 호출부에서 별도 처리)
         if not self.backtest_mode:
             self._save_record(snapshot, result, analyst_report, transcript, risk_assessment,
-                               debate_qa, final_qa, moderation, analyst_reports, quant=quant)
+                               debate_qa, final_qa, moderation, analyst_reports, quant=quant,
+                               consensus_score=consensus["score"])
 
         return {
             "market_analysis": asdict(market_analysis),
@@ -237,7 +262,7 @@ class TradingAgentsPipeline:
             "snapshot": {
                 "as_of": snapshot.as_of,
                 "us_indices": [{"name": q.name, "change_pct": q.change_pct, "direction": q.direction,
-                                "value": q.value, "rsi14": q.rsi14} for q in snapshot.us_indices],
+                                "value": q.value, "rsi14": q.rsi14, "as_of": q.as_of} for q in snapshot.us_indices],
                 "macro": [{"name": q.name, "change_pct": q.change_pct, "direction": q.direction, "value": q.value}
                           for q in (snapshot.macro or [])],
                 "kr_flow": snapshot.kr_flow,
@@ -248,6 +273,8 @@ class TradingAgentsPipeline:
             "news_titles": news_titles,
             "news_source": LAST_NEWS_SOURCE.get("source"),
             "source_registry": public_registry(source_registry),  # 뉴스 제목 제외, ID·출처만
+            "premarket_context": {"special_tags": extras["special_tags"], "base_rate": extras["base_rate"],
+                                  "disclosure_count": len(extras["disclosures"])},
             "news_universe": [{"code": u["code"], "name": u["name"], "core": u.get("core", False),
                                "rank": u.get("rank")} for u in news_universe],
             "stock_facts": stock_facts,
@@ -255,12 +282,13 @@ class TradingAgentsPipeline:
             "debate_qa": debate_qa,
             "moderation": moderation,
             "strategy_weights": strategy_weights,
+            "consensus": consensus,
             "risk_assessment": risk_assessment,
             "verification": verification,
             "similar_cases": [c.__dict__ for c in similar_cases],
             "final_result": result,
             "final_qa": final_qa,
-            "target_date": str(self._decide_target(snapshot)[2]),
+            "target_date": str(self._run_target(snapshot)[2]),
             "baselines": {
                 k: {"label": BASELINES[k], "direction": v}
                 for k, v in baseline_predictions(
@@ -353,6 +381,47 @@ class TradingAgentsPipeline:
         except Exception:  # noqa: BLE001
             return core
 
+    def _premarket_extras(self, snapshot, news_universe) -> dict:
+        """(V3.37) 기준 비율(과거 같은 SOX 구간 다음 날 코스피), 개장 전 대형주 공시, 특수 상황 태그."""
+        import os
+        out = {"base_rate": None, "base_rate_lines": [], "disclosures": [], "special_tags": []}
+        if self._is_demo() or os.environ.get("TA_HARNESS_OFFLINE") == "1":
+            return out
+        sox = next((q.change_pct for q in snapshot.us_indices if q.name == "SOX"), None)
+        target = self._run_target(snapshot)[2]
+        prev = None
+        try:
+            from data.base_rates import load_series, base_rate, registry_lines, kospi_prev_change
+            series = load_series(Config.BASE_RATE_CACHE_PATH, kst_now().date())
+            prev = kospi_prev_change(series, target)
+            out["base_rate"] = base_rate(series, target, sox, prev)
+            out["base_rate_lines"] = registry_lines(out["base_rate"])
+        except Exception as e:  # noqa: BLE001
+            print(f"[기준 비율 생략] {type(e).__name__}")
+        if not self.backtest_mode and os.environ.get("TA_NO_NEWS") != "1":
+            try:
+                from security.secret_store import get_api_key
+                from data.premarket_disclosures import collect
+                out["disclosures"] = collect(kst_now(), news_universe, get_api_key("dart"))
+            except Exception as e:  # noqa: BLE001
+                print(f"[개장 전 공시 생략] {type(e).__name__}")
+        from data.base_rates import special_tags
+        out["special_tags"] = special_tags(sox, prev, any("[삼성전자]" in t or "[SK하이닉스]" in t for t in out["disclosures"]))
+        return out
+
+    def _ai_titles(self) -> list[str]:
+        """(V3.36) 반도체 분석가용 AI·반도체 업계 소식(최근 36시간, 최대 10건). 데모·백테스트는 빈 목록(미래 정보 차단)."""
+        import os
+        if self._is_demo() or self.backtest_mode or os.environ.get("TA_NO_NEWS") == "1":
+            return []
+        try:
+            from datetime import timedelta as _td
+            from data.ai_sources import fetch_all, as_news_titles
+            return as_news_titles(fetch_all(kst_now(), _td(hours=36)), limit=10)
+        except Exception as e:  # noqa: BLE001 — 업계 소식 실패가 아침 분석을 막지 않는다
+            print(f"[AI 업계 소식 생략] {type(e).__name__}")
+            return []
+
     def _news_titles(self, snapshot: MarketSnapshot, universe: list[dict]) -> list[str]:
         """뉴스·심리 분석가용 최근 뉴스 제목. 백테스트에선 as_of 이전 것만(look-ahead 방지)."""
         try:
@@ -377,16 +446,28 @@ class TradingAgentsPipeline:
         score_after = decide_score_after(now, max(us_dates) if us_dates else None)
         return now, score_after, next_weekday_after(score_after)
 
+    def _run_target(self, snapshot: MarketSnapshot):
+        """(V3.31) 한 번의 실행 안에서는 대상일을 한 번만 정한다.
+        08:5x 에 시작한 분석이 09:00 을 넘기면 ETF 계획(오늘)과 저장 기록(다음 거래일)의 대상일이 갈려
+        아침 신호가 버려지거나 장 전 예측이 다음 날로 채점되던 문제."""
+        cached = getattr(self, "_target_cached", None)
+        if cached is not None and cached[0] is snapshot:
+            return cached[1]
+        t = self._decide_target(snapshot)
+        self._target_cached = (snapshot, t)
+        return t
+
     def _save_record(self, snapshot: MarketSnapshot, result: dict, analyst_report: dict | None = None,
                       transcript: list[dict] | None = None, risk_assessment: dict | None = None,
                       debate_qa: list[dict] | None = None, final_qa: dict | None = None,
                       moderation: dict | None = None, analyst_reports: dict | None = None,
-                      quant: dict | None = None):
-        pred = result.get("kospi_prediction", {})
+                      quant: dict | None = None, consensus_score: float | None = None):
+        pred = result.get("kospi_prediction") or {}
         if not pred.get("direction"):
+            print("[기록 저장 건너뜀] 최종 예측에 방향(direction)이 없어 오늘 예측을 저장하지 않았습니다.")
             return
 
-        now, score_after, target = self._decide_target(snapshot)
+        now, score_after, target = self._run_target(snapshot)
         today = now.date()
 
         stocks = []
@@ -484,6 +565,7 @@ class TradingAgentsPipeline:
             position_info=pred.get("position_info"),
             up_probability_raw=pred.get("up_probability_raw"),
             calibration_note=pred.get("calibration_note"),
+            consensus_score=consensus_score,
             situation_tags=self._situation_tags_for_record(snapshot, quant, pred),
             outcome_digest=self._digest(snapshot, result, analyst_reports, transcript, risk_assessment,
                                         debate_qa, moderation, quant),
@@ -587,8 +669,9 @@ class TradingAgentsPipeline:
         now = kst_now()
         if on == "yesterday":
             from datetime import timedelta as _td
+            from data.krx_calendar import is_trading_day
             day = now.date() - _td(days=1)
-            while day.weekday() >= 5:
+            while not is_trading_day(day):  # (V3.31) 주말뿐 아니라 KRX 휴장일도 건너뜀
                 day -= _td(days=1)
         else:
             day = _date.fromisoformat(on) if on else now.date()
@@ -602,6 +685,7 @@ class TradingAgentsPipeline:
             if existing is None or existing.get('observational'):
                 self.lessons.add({
                     'target_date': str(day), 'direction': verified.get('direction'),
+                    'up_probability': verified.get('up_probability'),
                     'actual_direction': verified.get('actual_direction'),
                     'correct': verified.get('correct'),
                     'strategy_return_pct': verified.get('strategy_return_pct'),
@@ -647,7 +731,7 @@ class TradingAgentsPipeline:
                "actual_change_pct": chg, "strategy_return_pct": None, "correct": pick.get("direction") == actual_dir,
                "actual_session_date": str(day) + (" (장중)" if intraday else "")}
         pm = run_postmortem(self.llm, rec, digest)
-        lesson = {"target_date": str(day), "direction": rec["direction"], "actual_direction": actual_dir,
+        lesson = {"target_date": str(day), "direction": rec["direction"], "up_probability": rec["up_probability"], "actual_direction": actual_dir,
                   "correct": rec["correct"], "strategy_return_pct": None,
                   "tags": list(pick.get("situation_tags") or []) + ["관찰"], "observational": True,
                   "reviewed_record": pick.get("target_date"),
@@ -696,6 +780,7 @@ class TradingAgentsPipeline:
             return
         lesson = {
             "target_date": target_date, "direction": rec.get("direction"),
+            "up_probability": rec.get("up_probability"),
             "actual_direction": rec.get("actual_direction"), "correct": rec.get("correct"),
             "strategy_return_pct": rec.get("strategy_return_pct"), "tags": rec.get("situation_tags") or [],
             **pm,

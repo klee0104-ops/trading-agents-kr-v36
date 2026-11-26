@@ -6,7 +6,10 @@
 $ErrorActionPreference = "Stop"
 if (-not (Test-Path $BatPath)) { Write-Host "[오류] 파일이 없습니다: $BatPath"; exit 1 }
 
-$action  = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$BatPath`"" -WorkingDirectory (Split-Path $BatPath)
+$BatPath = (Resolve-Path -LiteralPath $BatPath).Path
+$projectRoot = Split-Path $BatPath
+$python = Join-Path $projectRoot 'venv\Scripts\pythonw.exe'
+$action = New-ScheduledTaskAction -Execute $python -Argument "-B -m tools.weekday_task --batch `"$BatPath`"" -WorkingDirectory $projectRoot
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $Time
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun `
     -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew `
